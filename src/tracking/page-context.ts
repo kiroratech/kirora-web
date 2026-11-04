@@ -107,6 +107,28 @@ function withoutQuery(url: URL): string {
   return `${url.origin}${url.pathname}`;
 }
 
+/** How long a navigation waits for the new page's title before tracking without it. */
+const TITLE_WAIT_MS = 1000;
+
+/**
+ * Runs `then` once the page has a title. Next.js and others empty it as they navigate and
+ * set the new one a moment later.
+ */
+function whenTitled(then: () => void): void {
+  const { head } = document;
+  if (document.title || !head || typeof MutationObserver === 'undefined') return then();
+  const done = () => {
+    observer.disconnect();
+    clearTimeout(timer);
+    then();
+  };
+  const observer = new MutationObserver(() => {
+    if (document.title) done();
+  });
+  observer.observe(head, { childList: true, subtree: true, characterData: true });
+  const timer = setTimeout(done, TITLE_WAIT_MS);
+}
+
 /**
  * Calls `onPageView` now and on every path change, including SPA navigations through
  * `history`. Query-only changes don't count. Returns a function that stops watching.
@@ -120,8 +142,11 @@ export function watchPageViews(onPageView: () => void): () => void {
   const pathChanged = () =>
     setTimeout(() => {
       if (!watching || location.pathname === lastPath) return;
-      lastPath = location.pathname;
-      onPageView();
+      const path = (lastPath = location.pathname);
+      whenTitled(() => {
+        // Not if the app has moved on since: that page gets its own view.
+        if (watching && location.pathname === path) onPageView();
+      });
     });
   // The patches stay once stopped, doing nothing more: something else may have patched
   // `history` over ours since, so putting the originals back could undo theirs.

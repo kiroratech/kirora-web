@@ -5,3 +5,5 @@ dist/
 .env*.local
 examples/nextjs/public/kirora-sw.js
 docs/review.md
+# Written by `next dev`.
+examples/nextjs/AGENTS.md

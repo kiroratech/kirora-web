@@ -131,3 +131,72 @@ it('tracks the page the app moved to before the SDK loaded, after the held one',
     vi.useRealTimers();
   }
 });
+
+/** A page that navigates like Next.js: the title is emptied, then set a moment later. */
+function navigatingPage() {
+  const page = { title: 'Home', referrer: '', head: {}, querySelector: () => null };
+  const observers = new Set<() => void>();
+  vi.stubGlobal('location', new URL('https://example.com/'));
+  vi.stubGlobal('document', page);
+  vi.stubGlobal('history', { pushState: () => undefined, replaceState: () => undefined });
+  vi.stubGlobal('addEventListener', () => undefined);
+  vi.stubGlobal('removeEventListener', () => undefined);
+  vi.stubGlobal(
+    'MutationObserver',
+    class {
+      private readonly notify: () => void;
+      constructor(callback: () => void) {
+        this.notify = callback;
+      }
+      observe() {
+        observers.add(this.notify);
+      }
+      disconnect() {
+        observers.delete(this.notify);
+      }
+    },
+  );
+  return {
+    navigate(path: string) {
+      vi.stubGlobal('location', new URL(path, 'https://example.com'));
+      page.title = '';
+      history.pushState(null, '', path);
+    },
+    setTitle(title: string) {
+      page.title = title;
+      for (const notify of [...observers]) notify();
+    },
+  };
+}
+
+it('waits for the title an app sets after navigating, up to a second', async () => {
+  vi.useFakeTimers();
+  try {
+    const page = navigatingPage();
+    const viewed: string[] = [];
+    const stop = watchPageViews(() => {
+      const { path, title } = pageContext().page!;
+      viewed.push(`${path} ${title}`);
+    });
+
+    page.navigate('/pricing');
+    await vi.advanceTimersByTimeAsync(5);
+    page.setTitle('Pricing');
+    // Moved on before its title came: only the page it ended on is viewed.
+    page.navigate('/about');
+    await vi.advanceTimersByTimeAsync(5);
+    page.navigate('/docs');
+    await vi.advanceTimersByTimeAsync(5);
+    page.setTitle('Docs');
+    // A page that never gets a title is still viewed, a second later.
+    page.navigate('/blank');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(viewed).toEqual(['/ Home', '/pricing Pricing', '/docs Docs']);
+    await vi.advanceTimersByTimeAsync(1);
+    stop();
+
+    expect(viewed).toEqual(['/ Home', '/pricing Pricing', '/docs Docs', '/blank ']);
+  } finally {
+    vi.useRealTimers();
+  }
+});
