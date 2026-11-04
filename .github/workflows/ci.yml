@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets the release workflow run these checks before publishing.
+  workflow_call:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      # Builds once (`prepack`), and every check below uses this build and tarball.
+      - name: Build and pack
+        run: |
+          pnpm pack --pack-destination "$RUNNER_TEMP/pack"
+          echo "KIRORA_TARBALL=$(ls "$RUNNER_TEMP"/pack/*.tgz)" >> "$GITHUB_ENV"
+      - run: pnpm size
+      - run: pnpm check:package
+      # The tarball, installed with npm, Yarn and pnpm as customers would.
+      - run: pnpm check:consumers
+      - name: Build the Next.js example
+        run: pnpm --filter kirora-web-example-nextjs build
+        env:
+          NEXT_PUBLIC_KIRORA_CLIENT_KEY: kirora_pk_ci
+          KIRORA_SDK_TOKEN_SECRET: ci

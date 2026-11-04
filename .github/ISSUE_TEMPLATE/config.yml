@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or integration help
+    url: mailto:support@kirora.io
+    about: For questions about using Kirora, email our support team.
+  - name: Security vulnerability
+    url: mailto:security@kirora.io
+    about: Please report security issues privately, not as a public issue.

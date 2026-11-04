@@ -1,0 +1,70 @@
+{
+  "name": "@kirora/web",
+  "version": "0.1.0",
+  "description": "Kirora SDK for the browser: event tracking, consent and web push.",
+  "keywords": [
+    "kirora",
+    "analytics",
+    "event-tracking",
+    "web-push",
+    "consent",
+    "sdk",
+    "browser"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./kirora-sw.js": "./dist/kirora-sw.js",
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "jsdelivr": "dist/kirora.min.js",
+  "unpkg": "dist/kirora.min.js",
+  "files": [
+    "dist",
+    "llms.txt"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json && tsc -p src/push/worker/tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "size": "size-limit",
+    "check:consumers": "scripts/check-consumers.sh",
+    "check:package": "scripts/check-package.sh",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "changeset": "changeset",
+    "prepack": "pnpm build",
+    "release": "changeset publish"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@changesets/cli": "^3.0.3",
+    "@eslint/js": "^10.0.1",
+    "@size-limit/preset-small-lib": "~14.2.0",
+    "@types/node": "^22",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.13.0",
+    "prettier": "^3.9.6",
+    "publint": "^0.3.25",
+    "size-limit": "~14.2.0",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.72.0",
+    "vitest": "^3.2.4"
+  },
+  "packageManager": "pnpm@12.15.0"
+}

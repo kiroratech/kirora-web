@@ -1,0 +1,230 @@
+# @kirora/web
+
+> Kirora's browser SDK: tracks what signed-in users do (events, page views, sessions),
+> records tracking consent, and registers browsers for web push. This file tells an AI
+> coding agent how to install it in a customer's web app. Follow the steps in order and
+> ask the developer where a step says to. Everything you need is in this file; the
+> README.md next to it is the full reference.
+
+## Before you start: what you need from the developer
+
+- The **client key** (`kirora_pk_…`). Public; goes in client code.
+- The **token secret**. Private; server only. Never put it in client code, a public env var
+  (`NEXT_PUBLIC_*`, `VITE_*`, `PUBLIC_*`, `NUXT_PUBLIC_*`), or source control.
+- How the app knows who is signed in on the server (its session or auth library).
+
+Ask for anything you can't find. Don't invent keys.
+
+## Step 1: install
+
+Use the project's package manager (look for `pnpm-lock.yaml`, `yarn.lock`,
+`package-lock.json` or `bun.lock`):
+
+    npm install @kirora/web
+
+No bundler? Use the script-tag snippet from the README instead, with an exact version.
+
+## Step 2: add the token route on the server
+
+The SDK proves who's signed in with a short-lived token the app's server signs. Add a
+`GET` route, `/kirora-token` unless the developer prefers another path, that:
+
+1. Reads the signed-in user from the app's **own session**. Never from the request body,
+   query string or a header the browser controls: whoever is named gets the events.
+2. Returns 401 if nobody is signed in.
+3. Returns 500, and logs why, if the token secret isn't configured.
+4. Otherwise returns the token as plain text.
+5. Sends `Cache-Control: no-store` on every answer, 401 included.
+
+Sign it with `createUserToken(secret, userId)` from `@kirora/node` if the project already
+uses that package. Otherwise any JWT library works: HS256 with the token secret, claims
+`sub` (the app's user id, as a string), `iat`, and `exp` at most 24 hours later (1 hour is
+usual). With no library, in a server-only module such as `lib/kirora-token.ts`:
+
+    import { createHmac } from 'node:crypto';
+
+    export function createUserToken(
+      secret: string,
+      userId: string,
+      expiresInSeconds = 3600,
+    ): string {
+      const now = Math.floor(Date.now() / 1000);
+      const encode = (part: object) =>
+        Buffer.from(JSON.stringify(part)).toString('base64url');
+      const input = `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode({
+        sub: userId,
+        iat: now,
+        exp: now + expiresInSeconds,
+      })}`;
+      return `${input}.${createHmac('sha256', secret).update(input).digest('base64url')}`;
+    }
+
+Read the secret from a server-only environment variable, `KIRORA_SDK_TOKEN_SECRET`. Put it
+in the local env file the project already uses (`.env.local` for Next.js), and add the
+name without a value to `.env.example` if there is one.
+
+Next.js App Router: the route is `app/kirora-token/route.ts` (`src/app/…` if the project
+uses `src/`):
+
+    import { createUserToken } from '@/lib/kirora-token';
+
+    const noStore = { 'cache-control': 'no-store' };
+
+    export async function GET() {
+      const userId = await currentUserId(); // from the app's own session
+      if (!userId) return new Response(null, { status: 401, headers: noStore });
+      const secret = process.env.KIRORA_SDK_TOKEN_SECRET;
+      if (!secret) {
+        console.error('KIRORA_SDK_TOKEN_SECRET is not set');
+        return new Response(null, { status: 500, headers: noStore });
+      }
+      return new Response(createUserToken(secret, userId), {
+        headers: { ...noStore, 'content-type': 'text/plain' },
+      });
+    }
+
+Express and others: the same logic in a `GET` handler behind the app's auth middleware.
+
+## Step 3: create one client
+
+In a module of its own, created once, outside components: `lib/kirora.ts`, or
+`src/lib/kirora.ts` in a `src/` layout.
+
+    import { Kirora } from '@kirora/web';
+
+    export const kirora = new Kirora({
+      clientKey: process.env.NEXT_PUBLIC_KIRORA_CLIENT_KEY ?? '',
+      fetchUserToken: async () => {
+        const response = await fetch('/kirora-token');
+        // Throw on errors: the SDK keeps queued events and retries later.
+        if (!response.ok) throw new Error(`Token request failed: ${response.status}`);
+        return response.text();
+      },
+      trackPageViews: true,
+    });
+
+- Put the client key in the framework's public env var: `NEXT_PUBLIC_KIRORA_CLIENT_KEY`
+  (Next.js), `VITE_KIRORA_CLIENT_KEY` read as `import.meta.env.VITE_KIRORA_CLIENT_KEY`
+  (Vite), `NUXT_PUBLIC_KIRORA_CLIENT_KEY` (Nuxt). Hard-coding it is fine too; it's public.
+- If the app has a base path (Next.js `basePath`, Vite `base`), include it in the fetch.
+- Only call the SDK from client code: in Next.js, from `'use client'` components. The
+  module may still be imported while rendering on the server; that's safe, since the
+  server rendering does not start browser listeners. In the browser, sessions and optional
+  page views can be queued before `identify()`.
+
+## Step 4: identify and log out
+
+`identify()` tells the SDK who is signed in. Call it whenever the app knows a user is
+signed in: on every page load or app start while signed in, and right after sign-in. The
+usual way in React is a client component, always rendered, that receives the user id from
+the server and identifies whenever it changes:
+
+    'use client';
+
+    import { useEffect } from 'react';
+    import { kirora } from '@/lib/kirora';
+
+    export function KiroraSession({ userId }: { userId: string | null }) {
+      useEffect(() => {
+        if (userId) kirora.identify().catch((error) => console.error(error));
+      }, [userId]);
+      return null;
+    }
+
+Render it in the root layout with the user id from the app's session. If sign-in ends in a
+redirect or a full reload, the layout renders again with the new id, which covers "right
+after sign-in"; if sign-in happens without that (e.g. a client-side login form), also call
+`kirora.identify()` once it succeeds.
+
+Next.js with `cacheComponents` (the default in new apps): reading cookies or the session in
+the root layout must happen inside `<Suspense>`, or the build fails with "uncached or
+runtime data during prerendering". Read the session in a small async server component and
+render that inside `<Suspense fallback={null}>`:
+
+    async function KiroraSessionFromCookies() {
+      return <KiroraSession userId={await currentUserId()} />;
+    }
+
+    // in the layout's <body>:
+    <Suspense fallback={null}>
+      <KiroraSessionFromCookies />
+    </Suspense>
+
+**Sign-out:** `await kirora.logout()` before the app's own sign-out, and catch and log its
+errors so they never block signing out. If sign-out is a server action, a form POST or a
+library call like Auth.js `signOut()`, make the sign-out button a client component that
+awaits `kirora.logout()` first, then calls the action or submits the form. If a session
+ends some other way (expiry, another tab), nothing else is needed: the next `identify()`
+takes over and the previous user's unsent events are never sent as the new one.
+
+## Step 5: track events
+
+    kirora.track('Plan Upgraded', { plan: 'pro', seats: 5 });
+
+Names: object then past-tense action, Title Case (`Order Completed`, `Invoice Paid`).
+Details go in properties, not the name. Never start a name with `contact.`. Don't add
+tracking calls the developer didn't ask for, beyond page views.
+
+## Step 6 (ask first): tracking consent
+
+Ask whether visitors must opt in first (e.g. EU or UK users). If so, set
+`requireTrackingConsent: true` and call `kirora.setTrackingConsent(true | false)` from the
+app's cookie banner. If the app has no banner, say so; don't build one unasked.
+
+## Step 7 (ask first): web push
+
+Only if the developer wants web push and has created a web push app in the Kirora
+dashboard. Ask whether the workspace has more than one web push app: if it does, ask which,
+and pass its id as `push: { pushAppId: '…' }`; otherwise `push: true` is enough.
+
+1. Add `push` to the options in step 3.
+2. **Check for an existing service worker** first: search for
+   `navigator.serviceWorker.register`, `next-pwa`, `@serwist`, `vite-plugin-pwa`, Workbox,
+   Firebase Messaging, or a `sw.js` / `service-worker.js` in the public folder.
+   - **None:** serve the package's worker from the site's root, copied by the app's `dev`
+     and `build` scripts so it stays in step with the package. Chain the copy into the
+     scripts themselves; don't rely on `predev`/`prebuild` hooks, which Yarn 2+ skips:
+
+         "dev": "node -e \"require('fs').copyFileSync(require.resolve('@kirora/web/kirora-sw.js'),'public/kirora-sw.js')\" && next dev",
+         "build": "node -e \"require('fs').copyFileSync(require.resolve('@kirora/web/kirora-sw.js'),'public/kirora-sw.js')\" && next build",
+
+     (Use the project's real dev and build commands and public folder.) Add
+     `public/kirora-sw.js` to `.gitignore`: it's generated.
+   - **One exists:** don't add a second. A scope has one worker, so registering another
+     replaces it (the SDK refuses to, and logs this). Copy `kirora-sw.js` next to it as
+     above, add `importScripts('/kirora-sw.js');` at the top of the existing worker, and
+     set `push: { serviceWorkerUrl: '/<their worker>.js' }`. If the worker is generated
+     (next-pwa, Serwist, Workbox), use that tool's option for importing extra scripts. If
+     it's a module worker (`type: 'module'`), stop and tell the developer: `importScripts`
+     doesn't work there.
+3. Asking for permission needs a click from a signed-in user. Ask the developer where the
+   prompt belongs (e.g. account settings, after onboarding); if they have no preference,
+   add one small "Enable notifications" button in a signed-in area and tell them:
+
+       const permission = await kirora.requestPushPermission();
+       if (permission === 'granted') await kirora.setPushConsent(true);
+
+   Never call `requestPushPermission()` on page load: browsers block or penalise it.
+
+## Step 8: check it works
+
+1. Type-check and build the app.
+2. `GET /kirora-token` signed out returns 401; signed in, a three-part token whose payload
+   has your user id as `sub` and an `exp` an hour after `iat`.
+3. Add `logLevel: 'debug'` to the options, sign in, open the browser console, and look for
+   `Kirora: Sent … events` within 30 seconds, or right after switching tabs. Remove it
+   afterwards.
+4. Push: after allowing notifications, the console logs `Registered this browser with …`.
+   `/kirora-sw.js` (or the existing worker) must load with a JavaScript content type.
+   Send a test push from the Kirora dashboard.
+5. Tell the developer what you set up and what's left for them: keys to fill in, and any
+   consent or push decisions.
+
+## Common mistakes
+
+- Token secret in client code or a public env var.
+- Token route trusting a user id from the request.
+- `identify()` only on sign-in, not on every load while signed in.
+- `logout()` after the app's own sign-out, or not awaited.
+- A second service worker registered over the app's existing one.
+- `requestPushPermission()` called outside a click.

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>__PAGE_TITLE__ · Kirora script-tag example</title>
+    <script>
+      // The loader snippet from the README. It queues calls until the SDK loads. Here it
+      // loads the local build; on your site use
+      // https://cdn.jsdelivr.net/npm/@kirora/web@<version>/dist/kirora.min.js
+      (function (options) {
+        var kirora = (window.kirora = window.kirora || []);
+        if (!Array.isArray(kirora) || kirora.options) return;
+        function held() {
+          var canonical = document.querySelector('link[rel="canonical"]');
+          return {
+            at: Date.now(),
+            href: location.href,
+            title: document.title,
+            canonical: canonical ? canonical.href : undefined,
+          };
+        }
+        kirora.options = options;
+        kirora.start = held();
+        [
+          'identify',
+          'logout',
+          'track',
+          'trackPageView',
+          'setPushConsent',
+          'setTrackingConsent',
+        ].forEach(function (method) {
+          kirora[method] = function () {
+            kirora.push([method, Array.prototype.slice.call(arguments), held()]);
+          };
+        });
+        var script = document.createElement('script');
+        script.async = true;
+        script.src = '/kirora.min.js';
+        document.head.appendChild(script);
+      })(
+        Object.assign(__KIRORA_OPTIONS__, {
+          trackPageViews: true,
+          push: true,
+          logLevel: 'debug',
+          fetchUserToken: function () {
+            return fetch('/kirora-token').then(function (response) {
+              if (!response.ok)
+                throw new Error('Token request failed: ' + response.status);
+              return response.text();
+            });
+          },
+        }),
+      );
+
+      // Your server knows who's signed in; identify them on every page load.
+      var signedInUser = __SIGNED_IN_USER__;
+      if (signedInUser) kirora.identify();
+    </script>
+    <style>
+      body {
+        font:
+          16px/1.5 system-ui,
+          sans-serif;
+        max-width: 40rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      section {
+        border-top: 1px solid #ddd;
+        padding: 1rem 0;
+      }
+      button {
+        font: inherit;
+        margin: 0 0.5rem 0.5rem 0;
+      }
+    </style>
+  </head>
+  <body>
+    <nav><a href="/">Home</a> · <a href="/pricing">Pricing</a></nav>
+    <h1>__PAGE_TITLE__</h1>
+    <p>Open the console: <code>logLevel: 'debug'</code> logs every batch sent.</p>
+
+    <section id="signed-out">
+      <h2>Sign in</h2>
+      <p>A stand-in for your own sign-in. The token route signs whoever is named here.</p>
+      <form method="post" action="/sign-in">
+        <input name="userId" placeholder="User id, e.g. user-123" required />
+        <button>Sign in</button>
+      </form>
+    </section>
+
+    <section id="signed-in" hidden>
+      <h2>Signed in as <span id="user"></span></h2>
+      <button id="track">Track “Plan Upgraded”</button>
+      <button id="sign-out">Sign out</button>
+      <form id="sign-out-form" method="post" action="/sign-out"></form>
+    </section>
+
+    <section>
+      <h2>Web push</h2>
+      <p>Needs a web push app in the Kirora dashboard, and a signed-in user.</p>
+      <button id="push">Enable notifications</button>
+      <span id="push-result"></span>
+    </section>
+
+    <script>
+      if (signedInUser) {
+        document.getElementById('signed-out').hidden = true;
+        document.getElementById('signed-in').hidden = false;
+        document.getElementById('user').textContent = signedInUser;
+      }
+      document.getElementById('track').addEventListener('click', function () {
+        kirora.track('Plan Upgraded', { plan: 'pro', seats: 5 });
+      });
+      document.getElementById('sign-out').addEventListener('click', function () {
+        // Before your own sign-out, so queued events go as this user. Calls made before
+        // the SDK loads are queued and return nothing, so wait only once it has loaded.
+        Promise.resolve(kirora.logout())
+          .catch(function (error) {
+            console.error('Kirora logout failed', error);
+          })
+          .then(function () {
+            document.getElementById('sign-out-form').submit();
+          });
+      });
+      document.getElementById('push').addEventListener('click', function () {
+        var result = document.getElementById('push-result');
+        // Not queued by the snippet: the browser prompt must come from this click.
+        if (typeof kirora.requestPushPermission !== 'function') {
+          result.textContent = 'The SDK is still loading.';
+          return;
+        }
+        kirora
+          .requestPushPermission()
+          .then(function (permission) {
+            result.textContent = 'Permission: ' + permission;
+            if (permission === 'granted') return kirora.setPushConsent(true);
+          })
+          .catch(function (error) {
+            result.textContent = 'Failed: ' + error.message;
+          });
+      });
+    </script>
+  </body>
+</html>

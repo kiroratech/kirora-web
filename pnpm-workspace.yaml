@@ -1,0 +1,6 @@
+packages:
+  - examples/nextjs
+
+allowBuilds:
+  # Downloads its platform binary.
+  esbuild: true

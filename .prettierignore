@@ -1,0 +1,8 @@
+node_modules
+dist
+pnpm-lock.yaml
+CHANGELOG.md
+examples/**/.next
+examples/**/node_modules
+examples/**/public/kirora-sw.js
+examples/**/next-env.d.ts
