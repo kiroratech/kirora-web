@@ -29,7 +29,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
       # Opens a "Version packages" PR from the changesets, and publishes once it's merged.
-      - uses: changesets/action@v1
+      - uses: changesets/action@v2
         with:
           version: pnpm changeset version
           publish: pnpm release
