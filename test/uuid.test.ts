@@ -9,7 +9,8 @@ afterEach(() => {
 
 it('makes v4 UUIDs without crypto.randomUUID, as on plain http pages', () => {
   vi.stubGlobal('crypto', {
-    getRandomValues: (bytes: Uint8Array) => realCrypto.getRandomValues(bytes),
+    getRandomValues: (bytes: Uint8Array<ArrayBuffer>) =>
+      realCrypto.getRandomValues(bytes),
   });
   const ids = new Set(Array.from({ length: 100 }, () => uuid()));
 
