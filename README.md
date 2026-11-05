@@ -166,6 +166,22 @@ Set `trackPageViews: true` to track `Page Viewed` on every page, including singl
 navigations. Changes to the query string alone don't count as a new page. Or call
 `kirora.trackPageView()` yourself, e.g. from your router.
 
+Pages are recorded as Segment's analytics.js records them: the full address with its
+query string (`url`, `path`, `search`, `title`, `referrer`). Nothing in it is masked, so if
+a page's address carries a token or personal data (a password reset or magic link, an
+`?email=`), remove it before the SDK tracks the page:
+
+```ts
+const url = new URL(location.href);
+url.searchParams.delete('token');
+history.replaceState(history.state, '', url);
+```
+
+With the script tag, the loader snippet records the address as soon as it runs, so do this
+in a script placed before the snippet. Removing the token also keeps it out of the next
+page's `referrer`. Other sites' addresses usually arrive without their query string, since
+browsers send other sites only the origin by default.
+
 ### Sessions
 
 A session starts with a `Session Started` event. Its properties record how the visitor
@@ -419,11 +435,12 @@ name or whose properties aren't an object, which isn't tracked.
 - **If storage fails.** If `localStorage` is blocked or full, the SDK keeps events in memory
   instead and logs that once. They're still sent, but lost if the page reloads first.
 - **Event context.** Each event includes a `context` alongside your properties: the page
-  (`url`, `path`, `title`, `referrer`, using the canonical URL if the page has one), `utm_*`
-  campaign tags, `locale`, `timezone`, `sessionId` and `device.id`. Kirora adds the IP
-  address and user agent on the server.
-- **Privacy.** Query strings (other than `utm_*` tags) and URL fragments are never sent,
-  since they often contain tokens or email addresses.
+  (`url`, `path`, `search`, `title`, `referrer`, using the canonical URL if the page has
+  one, as Segment does), `utm_*` campaign tags, `locale`, `timezone`, `sessionId` and
+  `device.id`. Kirora adds the IP address and user agent on the server.
+- **Privacy.** Page addresses and the referrer are sent with their query strings; only URL
+  fragments are dropped. Remove tokens and personal data from your addresses before the
+  SDK tracks a page (see [Page views](#page-views)).
 - **Device id.** `device.id` and the session are stored in a first-party cookie on your
   root domain, so `www.` and `app.` subdomains are treated as the same visitor.
 - **Clock skew.** Event times are corrected on the server for differences in the device's

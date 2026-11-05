@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { Kirora, type KiroraOptions } from '../src/index.js';
 import {
   fakeKirora,
+  PUSH_APP_KEY,
   stubLocalStorage,
   stubWebPush,
   tokenFor,
@@ -205,8 +206,7 @@ it('reuses its own subscription where the browser cannot say which key made it',
   const kirora = pushClient();
   await kirora.identify(tokenFor('alice'));
   // As in Firefox 74, which has no PushSubscription.options.
-  const registration = await navigator.serviceWorker.getRegistration();
-  const subscription = await registration!.pushManager.getSubscription();
+  const subscription = await browserSubscription();
   Object.defineProperty(subscription, 'options', { value: undefined });
 
   await kirora.logout();
@@ -243,4 +243,84 @@ it('gives up on a service worker that never finishes installing', async () => {
   } finally {
     vi.useRealTimers();
   }
+});
+
+/** The browser's push subscription for our worker, if it has one. */
+async function browserSubscription(): Promise<PushSubscription | null> {
+  const registration = await navigator.serviceWorker.getRegistration();
+  return registration!.pushManager.getSubscription();
+}
+
+/** The key a subscription was made with, as bytes. */
+function keyOf(subscription: PushSubscription | null): number[] {
+  return [...new Uint8Array(subscription!.options.applicationServerKey!)];
+}
+
+/** A base64 key as bytes. */
+function bytesOf(base64: string): number[] {
+  return [...atob(base64)].map((character) => character.charCodeAt(0));
+}
+
+/** A key other than the push app's: the one a replaced push app, or another service, used. */
+const OTHER_KEY = new Uint8Array([9, 9, 9]);
+/** `OTHER_KEY` in base64url, as our registration record stores keys. */
+const OTHER_KEY_BASE64 = 'CQkJ';
+
+it("replaces its own subscription once it was made with a key the push app doesn't use", async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  // As if the push app was replaced since: the subscription has the old app's key.
+  const old = await browserSubscription();
+  Object.defineProperty(old, 'options', {
+    value: { applicationServerKey: OTHER_KEY.buffer },
+  });
+
+  await kirora.identify(tokenFor('bob'));
+
+  const replaced = await browserSubscription();
+  expect(replaced).not.toBe(old);
+  expect(keyOf(replaced)).toEqual(bytesOf(PUSH_APP_KEY));
+  expect(deviceChanges(server.handled)).toEqual(['alice', 'bob']);
+});
+
+it("leaves alone another service's subscription made with a different key", async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  // Another service subscribed this worker first, with its own key.
+  const registration = await navigator.serviceWorker.getRegistration();
+  const theirs = await registration!.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: OTHER_KEY,
+  });
+  Object.defineProperty(theirs, 'endpoint', { value: 'https://push.example.com/theirs' });
+  const kirora = pushClient();
+
+  await kirora.identify(tokenFor('alice'));
+
+  expect(await browserSubscription()).toBe(theirs);
+  expect(deviceChanges(server.handled)).toEqual([]);
+});
+
+it('replaces its own subscription where the browser cannot say its key, if it recorded another', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  // As in Firefox 74, which has no PushSubscription.options.
+  const old = await browserSubscription();
+  Object.defineProperty(old, 'options', { value: undefined });
+  // And our record says we made it with another key, before the push app was replaced.
+  const record = JSON.parse(localStorage.getItem(REGISTRATION_KEY)!) as object;
+  const recordWithOtherKey = { ...record, vapidPublicKey: OTHER_KEY_BASE64 };
+  localStorage.setItem(REGISTRATION_KEY, JSON.stringify(recordWithOtherKey));
+
+  await kirora.identify(tokenFor('bob'));
+
+  expect(await browserSubscription()).not.toBe(old);
+  expect(deviceChanges(server.handled)).toEqual(['alice', 'bob']);
 });

@@ -111,6 +111,11 @@ In a module of its own, created once, outside components: `lib/kirora.ts`, or
   module may still be imported while rendering on the server; that's safe, since the
   server rendering does not start browser listeners. In the browser, sessions and optional
   page views can be queued before `identify()`.
+- Every event carries the page's full address, query string included, as Segment
+  collects it. If a route's address holds a token or personal data (password reset, magic
+  link, invite, `?email=`), have the page remove it with `history.replaceState` before it
+  calls the SDK or tracks a page view. With the script tag, put that in a script before the
+  loader snippet, which records the address as soon as it runs.
 
 ## Step 4: identify and log out
 

@@ -13,12 +13,24 @@ const CAMPAIGN_TAGS = {
 
 type CampaignField = keyof typeof CAMPAIGN_TAGS;
 
+/** The page an event happened on, as Segment's analytics.js describes it. */
+export type Page = {
+  url: string;
+  path: string;
+  search: string;
+  title: string;
+  referrer?: string;
+};
+
+/** The page address's UTM tags. */
+export type Campaign = Partial<Record<CampaignField, string>>;
+
 /** The page part of an event's `context`. */
 export type PageContext = {
   locale?: string;
   timezone?: string;
-  page?: { url: string; path: string; title: string; referrer?: string };
-  campaign?: Partial<Record<CampaignField, string>>;
+  page?: Page;
+  campaign?: Campaign;
 };
 
 /** When and where the loader snippet recorded a call, before the SDK loaded. */
@@ -45,10 +57,10 @@ export function eventTime(): Date {
 }
 
 /**
- * Page info for an event's `context`. Uses the canonical URL if the page has one. The
- * query string (apart from UTM tags) and hash are dropped, since they often hold tokens
- * or emails. The page's markup is the site's, so a malformed address in it is left out
- * (or the page's own used instead) rather than thrown.
+ * Page info for an event's `context`, collected as Segment's analytics.js collects it.
+ * Kirora cuts values longer than it keeps, so none are cut here. The page's markup is the
+ * site's, so a malformed address in it is left out (or the page's
+ * own used instead) rather than thrown.
  */
 export function pageContext(): PageContext {
   if (typeof location === 'undefined' || typeof document === 'undefined') return {};
@@ -56,23 +68,46 @@ export function pageContext(): PageContext {
     locale: navigator.language,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   };
+
+  // During a replay, the page is the one the loader saw when the call was made.
   const address = urlOf(heldCall?.href) ?? new URL(location.href);
-  const canonical = heldCall
+  const canonicalHref = heldCall
     ? heldCall.canonical
     : document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href;
-  const page = urlOf(canonical, address) ?? address;
+  const canonical = urlOf(canonicalHref, address);
   const referrer = urlOf(document.referrer);
-  const campaign = campaignTags(address);
-  return {
-    ...localeAndTimezone,
-    page: {
-      url: withoutQuery(page),
-      path: page.pathname,
-      title: heldCall?.title ?? document.title,
-      ...(referrer ? { referrer: withoutQuery(referrer) } : {}),
-    },
-    ...(Object.keys(campaign).length > 0 ? { campaign } : {}),
+  const title = heldCall?.title ?? document.title;
+
+  const page: Page = {
+    url: pageUrl(address, canonical),
+    path: (canonical ?? address).pathname,
+    search: address.search,
+    title,
   };
+  if (referrer) page.referrer = withoutFragment(referrer);
+
+  const context: PageContext = { ...localeAndTimezone, page };
+  const campaign = campaignTags(address);
+  if (Object.keys(campaign).length > 0) context.campaign = campaign;
+  return context;
+}
+
+/**
+ * The page's URL, as Segment gives it: the canonical URL if the page has one, with the
+ * page's own query string added unless the canonical URL has one; otherwise the address
+ * the browser shows. Never the fragment.
+ */
+function pageUrl(address: URL, canonical: URL | undefined): string {
+  if (!canonical) return withoutFragment(address);
+  const url = new URL(canonical.href);
+  if (!url.search) url.search = address.search;
+  return withoutFragment(url);
+}
+
+function withoutFragment(url: URL): string {
+  const { href } = url;
+  const fragmentStart = href.indexOf('#');
+  return fragmentStart === -1 ? href : href.slice(0, fragmentStart);
 }
 
 /** `Session Started` properties: landing path, referrer and UTM tags. */
@@ -80,21 +115,18 @@ export function sessionStartedProperties({
   page,
   campaign = {},
 }: PageContext): Record<string, string> {
-  return {
-    ...(page ? { path: page.path } : {}),
-    ...(page?.referrer ? { referrer: page.referrer } : {}),
-    ...Object.fromEntries(
-      Object.entries(campaign).map(([field, value]) => [
-        CAMPAIGN_TAGS[field as CampaignField],
-        value,
-      ]),
-    ),
-  };
+  const properties: Record<string, string> = {};
+  if (page) properties.path = page.path;
+  if (page?.referrer) properties.referrer = page.referrer;
+  for (const [field, value] of Object.entries(campaign)) {
+    properties[CAMPAIGN_TAGS[field as CampaignField]] = value;
+  }
+  return properties;
 }
 
-/** The address's UTM tags, the only part of its query string we keep. */
-function campaignTags(address: URL): NonNullable<PageContext['campaign']> {
-  const campaign: PageContext['campaign'] = {};
+/** The address's UTM tags, as campaign fields. */
+function campaignTags(address: URL): Campaign {
+  const campaign: Campaign = {};
   for (const [field, tag] of Object.entries(CAMPAIGN_TAGS)) {
     const value = address.searchParams.get(tag);
     if (value) campaign[field as CampaignField] = value;
@@ -102,31 +134,47 @@ function campaignTags(address: URL): NonNullable<PageContext['campaign']> {
   return campaign;
 }
 
-/** The query string and fragment often hold tokens or emails, so they're never sent. */
-function withoutQuery(url: URL): string {
-  return `${url.origin}${url.pathname}`;
-}
-
-/** How long a navigation waits for the new page's title before tracking without it. */
-const TITLE_WAIT_MS = 1000;
+/**
+ * How long a navigation waits for the new page's title. Many apps keep one title for every
+ * page, so an unchanged title only gets a moment to change. An empty one (Next.js empties
+ * it while it navigates) is waited for longer.
+ */
+const UNCHANGED_TITLE_WAIT_MS = 100;
+const EMPTY_TITLE_WAIT_MS = 1000;
 
 /**
- * Runs `then` once the page has a title. Next.js and others empty it as they navigate and
- * set the new one a moment later.
+ * Calls `onReady` once the page's title has changed from `previousTitle`, the title it had
+ * when the app navigated, or once waiting longer isn't worth it (see above).
  */
-function whenTitled(then: () => void): void {
-  const { head } = document;
-  if (document.title || !head || typeof MutationObserver === 'undefined') return then();
-  const done = () => {
+function waitForNewTitle(previousTitle: string, onReady: () => void): void {
+  const hasNewTitle = () => document.title !== '' && document.title !== previousTitle;
+  if (hasNewTitle() || !document.head) {
+    onReady();
+    return;
+  }
+
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
     observer.disconnect();
-    clearTimeout(timer);
-    then();
+    clearTimeout(unchangedTimeout);
+    clearTimeout(emptyTimeout);
+    onReady();
   };
   const observer = new MutationObserver(() => {
-    if (document.title) done();
+    if (hasNewTitle()) finish();
   });
-  observer.observe(head, { childList: true, subtree: true, characterData: true });
-  const timer = setTimeout(done, TITLE_WAIT_MS);
+  const unchangedTimeout = setTimeout(() => {
+    if (document.title !== '') finish();
+  }, UNCHANGED_TITLE_WAIT_MS);
+  const emptyTimeout = setTimeout(finish, EMPTY_TITLE_WAIT_MS);
+  // The title lives in <head>, and frameworks change it by replacing or editing <title>.
+  observer.observe(document.head, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  });
 }
 
 /**
@@ -138,30 +186,35 @@ export function watchPageViews(onPageView: () => void): () => void {
   // navigated since without our patches in place yet.
   let lastPath = urlOf(heldCall?.href)?.pathname ?? location.pathname;
   let watching = true;
-  // Deferred so the app has a chance to update the title first.
-  const pathChanged = () =>
+  const onNavigation = () => {
+    // Noted now: by the time the app has rendered the new page, its title will have changed.
+    const previousTitle = document.title;
+    // Deferred, so a navigation that changes the path more than once counts once.
     setTimeout(() => {
       if (!watching || location.pathname === lastPath) return;
-      const path = (lastPath = location.pathname);
-      whenTitled(() => {
-        // Not if the app has moved on since: that page gets its own view.
-        if (watching && location.pathname === path) onPageView();
+      const newPath = location.pathname;
+      lastPath = newPath;
+      waitForNewTitle(previousTitle, () => {
+        // Not if the app has moved on meanwhile: that page gets its own view.
+        if (watching && location.pathname === newPath) onPageView();
       });
     });
+  };
   // The patches stay once stopped, doing nothing more: something else may have patched
   // `history` over ours since, so putting the originals back could undo theirs.
   for (const method of ['pushState', 'replaceState'] as const) {
     const original = history[method].bind(history);
     history[method] = (...args: Parameters<History['pushState']>) => {
       original(...args);
-      pathChanged();
+      onNavigation();
     };
   }
-  addEventListener('popstate', pathChanged);
+  addEventListener('popstate', onNavigation);
   onPageView();
-  pathChanged();
+  // In a replay, catches a page the app moved to after the held one, before we loaded.
+  onNavigation();
   return () => {
     watching = false;
-    removeEventListener('popstate', pathChanged);
+    removeEventListener('popstate', onNavigation);
   };
 }

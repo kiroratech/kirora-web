@@ -217,21 +217,17 @@ async function pushSubscription(
   const applicationServerKey = base64UrlBytes(vapidPublicKey);
   const existing = await registration.pushManager.getSubscription();
   if (existing) {
-    const ours = existing.endpoint === last?.endpoint;
-    // Browsers without `options` (Firefox before 75) can't say which key made it: it's
-    // taken as made with ours, unless it's ours and we know we used another.
-    const options = existing.options as PushSubscriptionOptions | undefined;
-    const sameKeyUsed = options
-      ? sameKey(options.applicationServerKey, applicationServerKey)
-      : !ours ||
-        last?.vapidPublicKey === undefined ||
-        last.vapidPublicKey === vapidPublicKey;
-    if (sameKeyUsed) return existing.toJSON();
-    if (!ours) {
+    // The record of what we registered last, if this subscription is the one we made.
+    const ourRecord = existing.endpoint === last?.endpoint ? last : null;
+    if (madeWithKey(existing, vapidPublicKey, applicationServerKey, ourRecord)) {
+      return existing.toJSON();
+    }
+    if (!ourRecord) {
       throw new KiroraError(
         'this service worker already has a push subscription from another service',
       );
     }
+    // Ours, but made with a key the push app no longer uses: replace it.
     await existing.unsubscribe();
   }
   const subscription = await registration.pushManager.subscribe({
@@ -239,6 +235,28 @@ async function pushSubscription(
     applicationServerKey,
   });
   return subscription.toJSON();
+}
+
+/**
+ * Whether `existing` was made with the push app's key, `vapidPublicKey`, so it can be
+ * reused. `ourRecord` is set if we made it.
+ */
+function madeWithKey(
+  existing: PushSubscription,
+  vapidPublicKey: string,
+  applicationServerKey: Uint8Array,
+  ourRecord: PushRegistration | null,
+): boolean {
+  // Missing in Firefox before 75, which can't say which key made a subscription.
+  const options = existing.options as PushSubscriptionOptions | undefined;
+  if (options) return sameKey(options.applicationServerKey, applicationServerKey);
+  // Then our own record says which key we used, if we made it (records saved before we
+  // started storing the key don't say).
+  if (ourRecord?.vapidPublicKey !== undefined) {
+    return ourRecord.vapidPublicKey === vapidPublicKey;
+  }
+  // Otherwise there's no telling, so it's taken as made with ours.
+  return true;
 }
 
 /**

@@ -107,6 +107,9 @@ export function stubWebPush(subscribing: Promise<void> = Promise.resolve()) {
   vi.stubGlobal('Notification', { permission: 'granted' });
 }
 
+/** The VAPID public key of the fake Kirora's push app, base64url: the bytes 1, 2, 3. */
+export const PUSH_APP_KEY = 'AQID';
+
 /** A request the fake Kirora below was sent. */
 export type SentRequest = {
   method: string;
@@ -137,7 +140,7 @@ export function fakeKirora(hold: (request: SentRequest) => boolean = () => false
       if (request.path === '/events/batch') return accepted(init.body);
       if (request.path === '/push-app') {
         return Response.json({
-          data: { pushAppId: 'app_web', name: 'Web', vapidPublicKey: 'AQID' },
+          data: { pushAppId: 'app_web', name: 'Web', vapidPublicKey: PUSH_APP_KEY },
         });
       }
       return new Response(null, { status: 204 });

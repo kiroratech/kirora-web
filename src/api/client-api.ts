@@ -65,15 +65,16 @@ export class ClientApi {
     const user = options.as ?? this.identity.user;
     if (!user) throw new KiroraError('call identify() with a user token first');
     const sentToken = user.token;
-    const first = await this.send(this.baseUrl, method, path, sentToken, options);
-    if (first !== REFUSED) return first as Data | undefined;
+    const answer = await this.send(this.baseUrl, method, path, sentToken, options);
+    if (answer !== REFUSED) return answer as Data | undefined;
+
+    // Kirora refused the token: get a fresh one, once, and try again with it.
     const freshToken = await this.identity.refresh(user, sentToken);
-    const second = freshToken
-      ? await this.send(this.baseUrl, method, path, freshToken, options)
-      : REFUSED;
-    if (second === REFUSED)
-      throw new KiroraApiError(401, undefined, 'Kirora answered 401');
-    return second as Data | undefined;
+    if (freshToken) {
+      const retried = await this.send(this.baseUrl, method, path, freshToken, options);
+      if (retried !== REFUSED) return retried as Data | undefined;
+    }
+    throw new KiroraApiError(401, undefined, 'Kirora answered 401');
   }
 
   /**
