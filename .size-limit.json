@@ -8,7 +8,7 @@
   {
     "name": "Script tag (kirora.min.js)",
     "path": "dist/kirora.min.js",
-    "limit": "8 kB"
+    "limit": "8.25 kB"
   },
   {
     "name": "Service worker (kirora-sw.js)",

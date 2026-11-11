@@ -9,3 +9,22 @@ export function withTimeout<Value>(promise: Promise<Value>, ms: number): Promise
   });
   return Promise.race([promise, timedOut]).finally(() => clearTimeout(timeout));
 }
+
+/**
+ * Whether `promise` settles by `deadline` (epoch ms). It isn't cancelled otherwise: it
+ * carries on by itself, and its outcome is nobody's concern.
+ */
+export async function settledBy(
+  promise: Promise<unknown>,
+  deadline: number,
+): Promise<boolean> {
+  try {
+    await withTimeout(
+      promise.catch(() => undefined),
+      deadline - Date.now(),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}

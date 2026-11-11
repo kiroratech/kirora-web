@@ -14,9 +14,15 @@ import { SESSION_KEEPALIVE_MS } from './tracking/session.js';
 import { Tracker } from './tracking/tracker.js';
 import type { EventProperties, KiroraOptions, PushPermission } from './types.js';
 import { logger, type Log } from './utils/log.js';
+import { settledBy } from './utils/timeout.js';
 
 /** A signed-in tab sends within minutes, so its events never wait this long. */
 const ORPHAN_EVENT_AGE_MS = 24 * 60 * 60_000;
+/**
+ * How long logout() waits for Kirora in all. Apps sign out after it, so an outage mustn't
+ * hold sign-out up for the 30 seconds each unanswered request gets.
+ */
+const LOGOUT_TIMEOUT_MS = 5_000;
 
 /**
  * The Kirora browser client. Create one for the whole site. Nothing is sent until
@@ -126,20 +132,33 @@ export class Kirora {
   }
 
   /**
-   * Call before your own sign-out. Tries to send queued events, detaches this browser
-   * from the user's pushes, then forgets the user and anything still unsent. If Kirora
-   * can't be told, the browser's push subscription is cancelled instead; it only throws
-   * if that fails too, and the user is forgotten either way.
+   * Call before your own sign-out. Tries to send queued events and detaches this browser
+   * from the user's pushes, giving Kirora five seconds in all, then forgets the user and
+   * anything still unsent. If Kirora can't be told in time, the browser's push
+   * subscription is cancelled instead; it only throws if that fails too, and the user is
+   * forgotten either way.
    */
   async logout(): Promise<void> {
     if (this.destroyed) return;
+    const deadline = Date.now() + LOGOUT_TIMEOUT_MS;
+    const signInsBefore = this.identity.generation;
     // Otherwise its push registration could land after the unregister.
-    await this.identity.settled();
+    const settled = await settledBy(this.identity.settled(), deadline);
     const { user } = this.identity;
-    if (!user) return;
-    await this.delivery.flush();
+    if (!user) {
+      // A sign-in still waiting for its token is abandoned: this logout came after it, so
+      // it wins, unless a newer sign-in has started since.
+      if (!settled && this.identity.generation === signInsBefore) this.identity.end();
+      return;
+    }
+    if (!(await settledBy(this.delivery.flush(), deadline))) {
+      this.log(
+        'error',
+        "Gave up waiting for Kirora; the user's unsent events are dropped",
+      );
+    }
     try {
-      await this.push.unregister(user);
+      await this.push.unregister(user, deadline);
     } finally {
       // Anything left belongs to this user, so don't send it as the next one. Events from
       // before sign-in go too, unless the next user is already signed in to send them;

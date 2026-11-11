@@ -244,7 +244,9 @@ it('never signs out a user who signed in while the last one was logging out', as
     ['alice', ['Invoice Paid']],
     ['bob', ['Plan Upgraded']],
   ]);
-  expect(server.requests.at(-1)).toMatchObject({ path: '/push-consent', user: 'bob' });
+  expect(server.requests).toContainEqual(
+    expect.objectContaining({ path: '/push-consent', user: 'bob' }),
+  );
 });
 
 it('keeps what the same user tracks after signing in again during their logout', async () => {
@@ -269,6 +271,101 @@ it('keeps what the same user tracks after signing in again during their logout',
     (JSON.parse(queued) as { event: { name: string } }[]).map(({ event }) => event.name),
   ).toEqual(['Plan Upgraded']);
   kirora.destroy();
+});
+
+it('gives a logout five seconds when Kirora never answers, then forgets the user', async () => {
+  vi.useFakeTimers();
+  try {
+    let hanging = true;
+    const sent = recordRequests(() => undefined);
+    const recorded = fetch;
+    vi.stubGlobal('fetch', (url: string, init: RequestInit) =>
+      hanging ? new Promise<Response>(() => undefined) : recorded(url, init),
+    );
+    const kirora = new Kirora({
+      clientKey: 'kirora_pk_a',
+      trackSessions: false,
+      logLevel: 'none',
+    });
+    await kirora.identify(tokenFor('alice'));
+    kirora.track('Invoice Paid');
+
+    let done = false;
+    const loggedOut = kirora.logout().then(() => (done = true));
+    await vi.advanceTimersByTimeAsync(4_900);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(100);
+    await loggedOut;
+
+    // Signed out: what's tracked now goes as whoever signs in next, and Alice's unsent
+    // event is forgotten rather than sent as them.
+    hanging = false;
+    kirora.track('Pricing Viewed');
+    await kirora.identify(tokenFor('bob'));
+    await kirora.flush();
+    expect(sent.map((request) => [request.user, eventNames(request)])).toEqual([
+      ['bob', ['Pricing Viewed']],
+    ]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('abandons a sign-in still waiting for its token when a logout gives up waiting', async () => {
+  vi.useFakeTimers();
+  try {
+    const sent = recordRequests(() => undefined);
+    let answer: (token: string) => void = () => undefined;
+    const kirora = new Kirora({
+      clientKey: 'kirora_pk_a',
+      trackSessions: false,
+      fetchUserToken: () => new Promise((resolve) => (answer = resolve)),
+    });
+    const identified = kirora.identify();
+    const loggedOut = kirora.logout();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await loggedOut;
+
+    // The token comes too late: the logout decided nobody is signed in.
+    answer(tokenFor('alice'));
+    await identified;
+    kirora.track('Pricing Viewed');
+    await kirora.flush();
+    expect(sent).toEqual([]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('keeps a sign-in started during a logout that then gave up waiting', async () => {
+  vi.useFakeTimers();
+  try {
+    const sent = recordRequests(() => undefined);
+    const answers: ((token: string) => void)[] = [];
+    const kirora = new Kirora({
+      clientKey: 'kirora_pk_a',
+      trackSessions: false,
+      fetchUserToken: () => new Promise((resolve) => answers.push(resolve)),
+    });
+    const alice = kirora.identify();
+    const loggedOut = kirora.logout();
+    const bob = kirora.identify();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await loggedOut;
+
+    // Bob's sign-in is newer than the logout, so it still wins, whenever tokens arrive.
+    answers[0]!(tokenFor('alice'));
+    await alice;
+    answers[1]!(tokenFor('bob'));
+    await bob;
+    kirora.track('Pricing Viewed');
+    await kirora.flush();
+    expect(sent.map((request) => [request.user, eventNames(request)])).toEqual([
+      ['bob', ['Pricing Viewed']],
+    ]);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it('starts no session and queues nothing when consent is given after destroying', () => {

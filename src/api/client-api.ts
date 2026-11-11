@@ -15,6 +15,8 @@ type RequestOptions = {
   keepalive?: boolean;
   /** The user to send as, if not whoever is signed in now. */
   as?: SignedInUser;
+  /** How long to wait for the answer, if less than usual. */
+  timeoutMs?: number;
 };
 
 /** A request still unanswered after this is abandoned and treated as a network failure. */
@@ -115,7 +117,7 @@ export class ClientApi {
       return ((await response.json()) as { data: unknown }).data;
     };
     try {
-      return await withTimeout(exchange(), REQUEST_TIMEOUT_MS);
+      return await withTimeout(exchange(), options.timeoutMs ?? REQUEST_TIMEOUT_MS);
     } finally {
       // Lets go of the call if it timed out; does nothing once it's answered.
       abort.abort();
