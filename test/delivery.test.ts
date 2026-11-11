@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { Kirora } from '../src/index.js';
-import { accepted, stubLocalStorage } from './fake-kirora.js';
+import { accepted, stubLocalStorage, tokenFor } from './fake-kirora.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -193,6 +193,36 @@ it("waits out Kirora's Retry-After, whatever else asks to send", async () => {
   await vi.advanceTimersByTimeAsync(15_000);
   expect(batches.length).toBeGreaterThan(1);
   vi.useRealTimers();
+});
+
+it('backs off from a token route whose tokens Kirora keeps refusing', async () => {
+  vi.useFakeTimers();
+  try {
+    let requests = 0;
+    let tokenFetches = 0;
+    vi.stubGlobal('fetch', () => {
+      requests++;
+      return Promise.resolve(new Response(null, { status: 401 }));
+    });
+    const kirora = new Kirora({
+      clientKey: 'kirora_pk_test',
+      trackSessions: false,
+      logLevel: 'none',
+      fetchUserToken: () => Promise.resolve(tokenFor('ada', `-${++tokenFetches}`)),
+    });
+    await kirora.identify(tokenFor('ada'));
+
+    // Tracking on for three minutes while every send is refused, refreshed once, and
+    // refused again. Each event would otherwise ask for another try within 30 seconds;
+    // backing off (30 seconds, then a minute, then two) leaves three tries.
+    for (let tick = 0; tick < 18; tick++) {
+      kirora.track('Plan Compared');
+      await vi.advanceTimersByTimeAsync(10_000);
+    }
+    expect([requests, tokenFetches]).toEqual([6, 3]);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it('understands Retry-After as an HTTP date', async () => {
