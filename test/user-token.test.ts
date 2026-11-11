@@ -40,6 +40,28 @@ it("never lets a fresh token for the previous user replace the next user's", asy
   expect(authorizations.at(-1)).toBe('Bearer token-for-grace');
 });
 
+it('refuses identify() anything but a user token', async () => {
+  const requests: string[] = [];
+  vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+    requests.push(`${init.method} ${new URL(url).pathname}`);
+    return Promise.resolve(accepted(init.body));
+  });
+  const kirora = new Kirora({
+    clientKey: 'kirora_pk_test',
+    trackSessions: false,
+    logLevel: 'none',
+  });
+  const untyped = kirora as unknown as { identify(token: unknown): Promise<void> };
+  // The user, or their id, instead of a token signed for them.
+  await expect(untyped.identify({ id: 'ada' })).rejects.toMatchObject({
+    name: 'KiroraError',
+  });
+  await expect(untyped.identify('')).rejects.toMatchObject({ name: 'KiroraError' });
+  kirora.track('Plan Upgraded');
+  await kirora.flush();
+  expect(requests).toEqual([]);
+});
+
 it('waits for identify() before calls that need the user', async () => {
   const calls: string[] = [];
   vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
