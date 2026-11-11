@@ -111,3 +111,24 @@ it('replays a logout before the calls after it, and carries on past a failed cal
   expect(failed).toHaveBeenCalledWith('Kirora: identify failed', expect.anything());
   failed.mockRestore();
 });
+
+it('still takes calls made through the snippet once the backlog has replayed', async () => {
+  const server = fakeKirora();
+  const snippet = loaderSnippet({ clientKey: 'kirora_pk_a', trackSessions: false }, [
+    ['identify', tokenFor('alice')],
+  ]);
+
+  await loadCdn(snippet);
+  const kirora = await replayed();
+  // Through a reference to the snippet the page kept from before the script loaded.
+  snippet.track('Late Event');
+  await kirora.flush();
+  snippet.identify(tokenFor('bob'));
+  snippet.track('Bob Event');
+  await kirora.flush();
+
+  expect(batches(server.requests)).toEqual([
+    ['alice', ['Late Event']],
+    ['bob', ['Bob Event']],
+  ]);
+});
