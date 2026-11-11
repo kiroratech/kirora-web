@@ -50,6 +50,11 @@ export class Identity {
     return this.signedIn;
   }
 
+  /** Changes with every signIn() and end(), so a caller can tell if either happened since. */
+  get generation(): number {
+    return this.calls;
+  }
+
   /**
    * Signs in with `token`, or one from `fetchUserToken`, then runs `onSignedIn`. Does
    * nothing if a later signIn() or signOut() has decided who's signed in meanwhile.

@@ -156,7 +156,8 @@ render that inside `<Suspense fallback={null}>`:
     </Suspense>
 
 **Sign-out:** `await kirora.logout()` before the app's own sign-out, and catch and log its
-errors so they never block signing out. If sign-out is a server action, a form POST or a
+errors so they never block signing out. It gives Kirora five seconds at most, so an outage
+can't hold sign-out up either. If sign-out is a server action, a form POST or a
 library call like Auth.js `signOut()`, make the sign-out button a client component that
 awaits `kirora.logout()` first, then calls the action or submits the form. If a session
 ends some other way (expiry, another tab), nothing else is needed: the next `identify()`

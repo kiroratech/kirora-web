@@ -31,6 +31,8 @@ export class EventDelivery {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private timerAt = 0;
   private flushing: Promise<void> | null = null;
+  /** Who the running send is for, to tell whether the next one may join it. */
+  private sendingAs: SignedInUser | null = null;
   private nextFlush: Promise<void> | null = null;
   /** A flush() asked to skip our own backoff: the next send does, whoever started it. */
   private backoffWaived = false;
@@ -80,8 +82,10 @@ export class EventDelivery {
    * if one is running, goes again after it.
    */
   private flushWhenDue(): Promise<void> {
-    // The running send may have read the queue before the latest events were added.
-    if (this.flushing) {
+    // The running send may have read the queue before the latest events were added. One
+    // for a user no longer signed in is left to itself instead, so the next user's events
+    // don't wait on an answer for it, e.g. after a logout gave up waiting for one.
+    if (this.flushing && this.sendingAs === this.identity.user) {
       const runNext = () => {
         this.nextFlush = null;
         return this.flushWhenDue();
@@ -89,10 +93,11 @@ export class EventDelivery {
       this.nextFlush ??= this.flushing.then(runNext, runNext);
       return this.nextFlush;
     }
-    this.flushing = this.send().finally(() => {
-      this.flushing = null;
+    const sending = this.send().finally(() => {
+      if (this.flushing === sending) this.flushing = null;
     });
-    return this.flushing;
+    this.flushing = sending;
+    return sending;
   }
 
   private stop(): void {
@@ -114,6 +119,7 @@ export class EventDelivery {
     // flushes for them.
     const { user } = this.identity;
     if (!user) return;
+    this.sendingAs = user;
     let maxEvents = EVENT_BATCH_SIZE;
     const mayStillSend = () =>
       this.identity.user === user && !this.destroyed && this.consent.allowed;

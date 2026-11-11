@@ -117,29 +117,38 @@ export class WebPush {
   }
 
   /**
-   * Detaches this browser from `user`. If Kirora can't be told (e.g. offline), the
-   * browser's subscription is cancelled instead, which stops pushes all the same; it's
-   * only thrown if both fail. Does nothing once someone else signs in: their registration,
-   * queued behind this, takes the browser over, and detaching would undo it.
+   * Detaches this browser from `user`, by `deadline` (epoch ms). If Kirora can't be told
+   * in time (e.g. offline, or it doesn't answer), the browser's subscription is cancelled
+   * instead, which stops pushes all the same; it's only thrown if both fail. Does nothing
+   * once someone else signs in: their registration, queued behind this, takes the browser
+   * over, and detaching would undo it.
    */
-  unregister(user: SignedInUser): Promise<void> {
-    return this.oneAtATime(async () => {
+  unregister(user: SignedInUser, deadline: number): Promise<void> {
+    const detached = this.oneAtATime(async () => {
       if (!this.registered || this.identity.user !== user) return;
-      try {
-        await this.api.request('DELETE', `/devices/${this.installationId()}`, {
-          as: user,
-        });
-      } catch (error) {
-        const unsubscribed = await unsubscribe(this.serviceWorkerUrl).catch(() => false);
-        if (!unsubscribed) throw error;
-        this.log(
-          'error',
-          "Couldn't detach this browser, so unsubscribed it from push",
-          error,
-        );
-      }
+      await this.api.request('DELETE', `/devices/${this.installationId()}`, {
+        as: user,
+        timeoutMs: deadline - Date.now(),
+      });
       this.storage.removeItem(this.registrationKey);
     });
+    // A registration still under way goes first, so waiting for a turn is bounded too.
+    return withTimeout(detached, deadline - Date.now()).catch((error: unknown) =>
+      this.unsubscribeInstead(error),
+    );
+  }
+
+  /** Kirora couldn't be told: cancels the subscription instead, if this browser has ours. */
+  private async unsubscribeInstead(error: unknown): Promise<void> {
+    if (!this.registered) return;
+    const unsubscribed = await unsubscribe(this.serviceWorkerUrl).catch(() => false);
+    if (!unsubscribed) throw error;
+    this.log(
+      'error',
+      "Couldn't detach this browser, so unsubscribed it from push",
+      error,
+    );
+    this.storage.removeItem(this.registrationKey);
   }
 
   /**

@@ -148,6 +148,29 @@ it("registers the next user after a logout's detachment, when they sign in durin
   expect(server.requests.at(-1)).toMatchObject({ path: '/push-consent', user: 'bob' });
 });
 
+it("unsubscribes the browser when Kirora doesn't answer a logout's detachment in time", async () => {
+  stubLocalStorage();
+  stubWebPush();
+  // The detachment is never answered.
+  const server = fakeKirora((request) => request.method === 'DELETE');
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  expect(await browserSubscription()).not.toBeNull();
+
+  vi.useFakeTimers();
+  try {
+    const loggedOut = kirora.logout();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await loggedOut;
+  } finally {
+    vi.useRealTimers();
+  }
+
+  expect(deviceChanges(server.requests)).toEqual(['alice', '-alice']);
+  expect(await browserSubscription()).toBeNull();
+  expect(savedRegistration()).toBeUndefined();
+});
+
 it('sends nothing once destroyed, even for a sign-in still waiting for its token', async () => {
   stubLocalStorage();
   stubWebPush();
