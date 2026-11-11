@@ -144,6 +144,9 @@ try {
 `identify(token)`. This argument is a signed token, not a user ID. Handle rejected
 promises from `identify()`, `logout()` and push methods in your application.
 
+`logout()` gives Kirora five seconds in all, so an outage can't hold up your sign-out:
+past that, the user is forgotten anyway, along with anything still unsent.
+
 Tokens stay in memory, so identification must run again after a reload. When a token is
 refused, the SDK can call `fetchUserToken` to refresh it; a supplied token alone cannot
 be refreshed automatically.
@@ -359,8 +362,9 @@ from the quickstart, and pin the CDN URL to the SDK version you use.
 The queued calls are replayed one at a time, each after the one before has finished, so
 an event tracked after `identify()` or `logout()` belongs to the user that left signed in.
 Calls made while they replay join the end of the queue. Then `window.kirora` becomes the
-SDK instance. `requestPushPermission()` isn't queued because it must run during a click,
-so call it after the SDK has loaded.
+SDK instance, and calls through a reference to the snippet kept from before go straight to
+it. `requestPushPermission()` isn't queued because it must run during a click, so call it
+after the SDK has loaded.
 
 </details>
 
@@ -396,17 +400,17 @@ SDK adds its own.
 
 ### Methods
 
-| Method                        | Description                                                                                     |
-| ----------------------------- | ----------------------------------------------------------------------------------------------- |
-| `identify(token?)`            | Sets the user, starts sending queued events and registers for push if allowed                   |
-| `logout()`                    | Tries to send queued events, detaches this browser from pushes, forgets the user                |
-| `track(name, properties?)`    | Tracks an event                                                                                 |
-| `trackPageView()`             | Tracks `Page Viewed` for the current page                                                       |
-| `requestPushPermission()`     | Shows the browser prompt. Returns `granted`, `denied`, `unanswered` or `unsupported`            |
-| `setPushConsent(granted)`     | Records consent to marketing pushes                                                             |
-| `setTrackingConsent(granted)` | Records tracking consent. A refusal is honoured with or without `requireTrackingConsent`        |
-| `flush()`                     | Tries to send queued events now. Some may wait for a retry. Rarely needed                       |
-| `destroy()`                   | Stops timers, listeners and sending, e.g. on hot reload. Queued events stay for the next client |
+| Method                        | Description                                                                                                   |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `identify(token?)`            | Sets the user, starts sending queued events and registers for push if allowed                                 |
+| `logout()`                    | Tries to send queued events and detaches this browser from pushes, within five seconds, then forgets the user |
+| `track(name, properties?)`    | Tracks an event                                                                                               |
+| `trackPageView()`             | Tracks `Page Viewed` for the current page                                                                     |
+| `requestPushPermission()`     | Shows the browser prompt. Returns `granted`, `denied`, `unanswered` or `unsupported`                          |
+| `setPushConsent(granted)`     | Records consent to marketing pushes                                                                           |
+| `setTrackingConsent(granted)` | Records tracking consent. A refusal is honoured with or without `requireTrackingConsent`                      |
+| `flush()`                     | Tries to send queued events now. Some may wait for a retry. Rarely needed                                     |
+| `destroy()`                   | Stops timers, listeners and sending, e.g. on hot reload. Queued events stay for the next client               |
 
 ### Errors
 
@@ -508,7 +512,8 @@ Segments, journeys and goals match event names exactly, so keep them consistent:
    Signed in, expect a plain-text JWT for the session user, with the same cache header.
 2. Temporarily set `logLevel: 'debug'`, identify a signed-in user and track an event.
    Look for `Kirora: Sent … events` within 30 seconds or after switching tabs.
-   Debug logs include event data; remove this setting after checking.
+   Debug logs say how many events were sent, not what they held; remove this setting
+   after checking.
 3. If consent is required, check that tracking is blocked before acceptance and that
    withdrawing consent clears the queue.
 4. For push, check that your service worker URL serves JavaScript, then enable
