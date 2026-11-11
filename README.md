@@ -512,7 +512,8 @@ Segments, journeys and goals match event names exactly, so keep them consistent:
    Signed in, expect a plain-text JWT for the session user, with the same cache header.
 2. Temporarily set `logLevel: 'debug'`, identify a signed-in user and track an event.
    Look for `Kirora: Sent … events` within 30 seconds or after switching tabs.
-   Debug logs include event data; remove this setting after checking.
+   Debug logs say how many events were sent, not what they held; remove this setting
+   after checking.
 3. If consent is required, check that tracking is blocked before acceptance and that
    withdrawing consent clears the queue.
 4. For push, check that your service worker URL serves JavaScript, then enable
