@@ -185,9 +185,11 @@ export class EventDelivery {
       return 'stop';
     }
     // Still refused after a token refresh, or the user changed: keep the events for the
-    // next identify() as their own user.
+    // next identify() as their own user. Backing off meanwhile, as a token route that
+    // keeps handing out refused tokens would otherwise be asked again at every send.
     if (error.status === 401) {
       this.log('error', 'Events not sent', error);
+      this.retryLater();
       return 'stop';
     }
     // Too large or invalid: retry in halves until we isolate the bad event, so the rest of
