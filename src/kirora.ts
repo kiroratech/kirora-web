@@ -1,5 +1,5 @@
 import { ClientApi } from './api/client-api.js';
-import { KiroraApiError, UserTokenError } from './errors.js';
+import { KiroraApiError, KiroraError, UserTokenError } from './errors.js';
 import { EventDelivery } from './events/event-delivery.js';
 import { EventQueue } from './events/event-queue.js';
 import { Identity, isUnnamedSubject } from './identity/identity.js';
@@ -128,7 +128,8 @@ export class Kirora {
    * only for the token; push registration errors are logged.
    */
   async identify(userToken?: string): Promise<void> {
-    if (!this.destroyed) await this.identity.signIn(userToken, () => this.onSignedIn());
+    if (this.destroyed) return;
+    await this.identity.signIn(userTokenOf(userToken), () => this.onSignedIn());
   }
 
   /**
@@ -269,4 +270,17 @@ export class Kirora {
       this.log('error', 'Push registration failed', error);
     }
   }
+}
+
+/**
+ * The token `identify()` was given, or undefined for none. Plain JavaScript can pass
+ * anything, e.g. the user instead of their token, which Kirora would refuse without
+ * saying why; that's refused here instead.
+ */
+function userTokenOf(argument: unknown): string | undefined {
+  if (argument === undefined || argument === null) return undefined;
+  if (typeof argument === 'string' && argument !== '') return argument;
+  throw new KiroraError(
+    'identify() takes a user token, or nothing to use fetchUserToken',
+  );
 }
