@@ -359,8 +359,9 @@ from the quickstart, and pin the CDN URL to the SDK version you use.
 The queued calls are replayed one at a time, each after the one before has finished, so
 an event tracked after `identify()` or `logout()` belongs to the user that left signed in.
 Calls made while they replay join the end of the queue. Then `window.kirora` becomes the
-SDK instance. `requestPushPermission()` isn't queued because it must run during a click,
-so call it after the SDK has loaded.
+SDK instance, and calls through a reference to the snippet kept from before go straight to
+it. `requestPushPermission()` isn't queued because it must run during a click, so call it
+after the SDK has loaded.
 
 </details>
 
