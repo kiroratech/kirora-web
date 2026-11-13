@@ -15,7 +15,7 @@ type KiroraPush = {
   imageUrl?: string;
   tag?: string;
   buttons?: { title: string; url?: string }[];
-  /** Where to report opens and clicks. Missing on test sends. */
+  /** Where to report deliveries, opens and clicks. Missing on test sends. */
   trackingUrl?: string;
 };
 

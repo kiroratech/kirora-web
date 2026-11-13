@@ -493,7 +493,7 @@ The script-tag snippet is inline, so it needs a `nonce` or a `sha256-` hash in
 `script-src`; never `'unsafe-inline'`. Or put the snippet in a file on your own origin.
 
 A service worker gets its own CSP from the headers it's served with. If you set one
-there, its `connect-src` must allow Kirora's API too, which is where impressions, opens
+there, its `connect-src` must allow Kirora's API too, which is where deliveries, opens
 and clicks are reported.
 
 ## Naming events
