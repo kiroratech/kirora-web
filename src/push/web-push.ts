@@ -98,8 +98,7 @@ export class WebPush {
         targetKind: 'web_push_subscription',
         permission: 'granted',
         subscription,
-        // For push reports by language and time zone. Web sends no app or OS version:
-        // a site has none, and Kirora reads the browser's from its user agent.
+        // For push reports. No app or OS version: Kirora reads the user agent.
         ...localeAndTimezone(),
       },
     });

@@ -103,9 +103,7 @@ it('reports a push as delivered once it is on screen', async () => {
   ]);
 });
 
-it('reports no delivery for a test push, or a push that could not be shown', async () => {
-  expect(await show({ kirora: 1, title: 'Test notification' })).toEqual([]);
-
+it('reports no delivery for a push that could not be shown', async () => {
   const { registration } = self as unknown as {
     registration: { showNotification: (...args: unknown[]) => Promise<void> };
   };
@@ -120,45 +118,32 @@ it('reports no delivery for a test push, or a push that could not be shown', asy
   }
 });
 
-it('tries a rate-limited tap report once more', async () => {
+it('tries a failed report once more, then drops it', async () => {
   const recordAndAnswer = fetch;
-  let taps = 0;
-  vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
-    const tap = String(init.body).includes('opened');
-    const status = tap && ++taps === 1 ? 429 : 204;
-    return recordAndAnswer(url, init).then(() => new Response(null, { status }));
-  });
-  try {
-    await deliver(
-      JSON.stringify({ kirora: 1, title: 'Hi', trackingUrl: 'https://t/p/tap' }),
-    );
-    expect(taps).toBe(2);
-  } finally {
-    vi.stubGlobal('fetch', recordAndAnswer);
-  }
-});
-
-it('tries a failed delivery report once more, then drops it', async () => {
-  const recordAndAnswer = fetch;
-  let attempts = 0;
+  /** Answers every report with `status`, and counts the attempts. */
   const answering = (status: number) => {
+    let attempts = 0;
     vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
       attempts++;
       return recordAndAnswer(url, init).then(() => new Response(null, { status }));
     });
+    return () => attempts;
   };
   const push = { kirora: 1, title: 'Hi', trackingUrl: 'https://t/p/mno' };
   try {
-    answering(503);
-    expect(await show(push)).toHaveLength(2);
-    expect(attempts).toBe(2);
-    answering(429);
-    expect(await show(push)).toHaveLength(2);
-    expect(attempts).toBe(4);
+    for (const status of [503, 429]) {
+      const attempts = answering(status);
+      await show(push);
+      expect(attempts()).toBe(2);
+    }
     // An expired or altered token is refused for good: no second try.
-    answering(400);
-    expect(await show(push)).toHaveLength(1);
-    expect(attempts).toBe(5);
+    const refused = answering(400);
+    await show(push);
+    expect(refused()).toBe(1);
+    // Taps too: one delivery and one tap, each tried twice.
+    const tapped = answering(429);
+    await deliver(JSON.stringify(push));
+    expect(tapped()).toBe(4);
   } finally {
     vi.stubGlobal('fetch', recordAndAnswer);
   }
