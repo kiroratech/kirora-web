@@ -100,8 +100,8 @@ async function report(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ event }),
     }).then(
-      // A 4xx would be refused again.
-      (response) => response.status < 500,
+      // Any other 4xx would be refused again.
+      (response) => response.status < 500 && response.status !== 429,
       () => false,
     );
   if (!(await send()) && event === 'delivered') await send();
