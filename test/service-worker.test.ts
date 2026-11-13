@@ -134,10 +134,13 @@ it('tries a failed delivery report once more, then drops it', async () => {
     answering(503);
     expect(await show(push)).toHaveLength(2);
     expect(attempts).toBe(2);
+    answering(429);
+    expect(await show(push)).toHaveLength(2);
+    expect(attempts).toBe(4);
     // An expired or altered token is refused for good: no second try.
     answering(400);
     expect(await show(push)).toHaveLength(1);
-    expect(attempts).toBe(3);
+    expect(attempts).toBe(5);
   } finally {
     vi.stubGlobal('fetch', recordAndAnswer);
   }
