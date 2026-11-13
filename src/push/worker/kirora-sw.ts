@@ -87,8 +87,9 @@ self.addEventListener('notificationclick', (event) => {
 
 /**
  * Reports a push delivered (on screen) or tapped to its tracking URL, which names the
- * device it went to. Never rejects. A delivery is a best-effort count, so a failed one is
- * tried once more, then dropped, rather than keeping the worker alive for it.
+ * device it went to. Never rejects. A best-effort count: a failed report is tried once
+ * more, then dropped, rather than keeping the worker alive for it. A repeat changes
+ * nothing on Kirora's side.
  */
 async function report(
   trackingUrl: string,
@@ -104,5 +105,5 @@ async function report(
       (response) => response.status < 500 && response.status !== 429,
       () => false,
     );
-  if (!(await send()) && event === 'delivered') await send();
+  if (!(await send())) await send();
 }
