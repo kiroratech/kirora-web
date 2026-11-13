@@ -48,21 +48,25 @@ self.addEventListener('push', (event) => {
   const data: NotificationData = {
     kirora: { actionUrl: push.actionUrl, trackingUrl: push.trackingUrl, buttons },
   };
+  const { trackingUrl } = push;
   event.waitUntil(
-    self.registration.showNotification(push.title ?? '', {
-      body: push.body,
-      icon: push.iconUrl,
-      tag: push.tag,
-      data,
-      // Not in TypeScript's NotificationOptions yet, but Chrome and Edge show them.
-      ...({
-        image: push.imageUrl,
-        actions: buttons.map((button, index) => ({
-          action: String(index),
-          title: button.title,
-        })),
-      } as NotificationOptions),
-    }),
+    self.registration
+      .showNotification(push.title ?? '', {
+        body: push.body,
+        icon: push.iconUrl,
+        tag: push.tag,
+        data,
+        // Not in TypeScript's NotificationOptions yet, but Chrome and Edge show them.
+        ...({
+          image: push.imageUrl,
+          actions: buttons.map((button, index) => ({
+            action: String(index),
+            title: button.title,
+          })),
+        } as NotificationOptions),
+      })
+      // On screen, so delivered. Test sends have no tracking URL.
+      .then(() => (trackingUrl ? report(trackingUrl, 'delivered') : undefined)),
   );
 });
 
@@ -75,14 +79,30 @@ self.addEventListener('notificationclick', (event) => {
   const url = event.action ? data.buttons[Number(event.action)]?.url : data.actionUrl;
   event.waitUntil(
     Promise.all([
-      data.trackingUrl
-        ? fetch(data.trackingUrl, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ event: url ? 'clicked' : 'opened' }),
-          }).catch(() => undefined)
-        : undefined,
+      data.trackingUrl ? report(data.trackingUrl, url ? 'clicked' : 'opened') : undefined,
       url ? self.clients.openWindow(url) : undefined,
     ]),
   );
 });
+
+/**
+ * Reports a push delivered (on screen) or tapped to its tracking URL, which names the
+ * device it went to. Never rejects. A delivery is a best-effort count, so a failed one is
+ * tried once more, then dropped, rather than keeping the worker alive for it.
+ */
+async function report(
+  trackingUrl: string,
+  event: 'delivered' | 'opened' | 'clicked',
+): Promise<void> {
+  const send = () =>
+    fetch(trackingUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event }),
+    }).then(
+      // A 4xx would be refused again.
+      (response) => response.status < 500,
+      () => false,
+    );
+  if (!(await send()) && event === 'delivered') await send();
+}

@@ -324,3 +324,26 @@ it('replaces its own subscription where the browser cannot say its key, if it re
   expect(await browserSubscription()).not.toBe(old);
   expect(deviceChanges(server.handled)).toEqual(['alice', 'bob']);
 });
+
+it("registers with the browser's language and time zone, and nothing else about it", async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  await pushClient().identify(tokenFor('alice'));
+
+  const registration = server.requests.find((request) => request.method === 'PUT')!;
+  expect(registration.body).toEqual({
+    pushAppId: 'app_web',
+    targetKind: 'web_push_subscription',
+    permission: 'granted',
+    subscription: expect.objectContaining({
+      endpoint: 'https://push.example.com/subscription',
+    }) as unknown,
+    locale: 'en',
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  });
+  // Web reports no app opens in version 1: its push opens come from taps.
+  expect(server.requests.some((request) => request.path.endsWith('/app-opens'))).toBe(
+    false,
+  );
+});

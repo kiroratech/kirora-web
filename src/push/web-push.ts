@@ -3,6 +3,7 @@ import type { Identity, SignedInUser } from '../identity/identity.js';
 import { KiroraApiError, KiroraError } from '../errors.js';
 import { readJson, type KeyValueStorage } from '../storage/device-storage.js';
 import { STORAGE_KEYS } from '../storage/keys.js';
+import { localeAndTimezone } from '../tracking/page-context.js';
 import { base64UrlDecode } from '../utils/base64url.js';
 import { withTimeout } from '../utils/timeout.js';
 import type { PushOptions, PushPermission } from '../types.js';
@@ -97,6 +98,9 @@ export class WebPush {
         targetKind: 'web_push_subscription',
         permission: 'granted',
         subscription,
+        // For push reports by language and time zone. Web sends no app or OS version:
+        // a site has none, and Kirora reads the browser's from its user agent.
+        ...localeAndTimezone(),
       },
     });
     // Saved even if the user changed meanwhile: it records who Kirora now has, so the
