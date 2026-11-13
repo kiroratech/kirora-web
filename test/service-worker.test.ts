@@ -120,6 +120,24 @@ it('reports no delivery for a test push, or a push that could not be shown', asy
   }
 });
 
+it('tries a rate-limited tap report once more', async () => {
+  const recordAndAnswer = fetch;
+  let taps = 0;
+  vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+    const tap = String(init.body).includes('opened');
+    const status = tap && ++taps === 1 ? 429 : 204;
+    return recordAndAnswer(url, init).then(() => new Response(null, { status }));
+  });
+  try {
+    await deliver(
+      JSON.stringify({ kirora: 1, title: 'Hi', trackingUrl: 'https://t/p/tap' }),
+    );
+    expect(taps).toBe(2);
+  } finally {
+    vi.stubGlobal('fetch', recordAndAnswer);
+  }
+});
+
 it('tries a failed delivery report once more, then drops it', async () => {
   const recordAndAnswer = fetch;
   let attempts = 0;
