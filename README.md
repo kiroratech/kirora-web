@@ -234,7 +234,8 @@ are separate settings.
    ```
 
    Repeat the copy when the SDK is updated, ideally as part of your app's build. The
-   worker handles Kirora pushes and reports opens and clicks automatically.
+   worker handles Kirora pushes and reports when they're shown, opened and clicked,
+   automatically.
 
    **If your site already has a service worker** (e.g. a PWA), a scope can only have one,
    so don't add a second. Serve `kirora-sw.js` next to yours, import it, and tell the SDK
@@ -445,6 +446,13 @@ name or whose properties aren't an object, which isn't tracked.
 - **Privacy.** Page addresses and the referrer are sent with their query strings; only URL
   fragments are dropped. Remove tokens and personal data from your addresses before the
   SDK tracks a page (see [Page views](#page-views)).
+- **Push reporting.** To report how push notifications perform, the SDK sends:
+  - the browser's language and time zone, when it registers the browser for push;
+  - when a Kirora notification is shown or tapped.
+
+  It never sends hardware or advertising identifiers. Kirora reads the browser and OS
+  from the user agent; the SDK sends no app or OS version.
+
 - **Device id.** `device.id` and the session are stored in a first-party cookie on your
   root domain, so `www.` and `app.` subdomains are treated as the same visitor.
 - **Clock skew.** Event times are corrected on the server for differences in the device's
@@ -489,8 +497,8 @@ The script-tag snippet is inline, so it needs a `nonce` or a `sha256-` hash in
 `script-src`; never `'unsafe-inline'`. Or put the snippet in a file on your own origin.
 
 A service worker gets its own CSP from the headers it's served with. If you set one
-there, its `connect-src` must allow Kirora's API too, which is where opens and clicks
-are reported.
+there, its `connect-src` must allow Kirora's API too, which is where impressions, opens
+and clicks are reported.
 
 ## Naming events
 

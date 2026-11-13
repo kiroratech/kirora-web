@@ -37,7 +37,7 @@ export type PageContext = {
 export type HeldCall = { at: number; href: string; title: string; canonical?: string };
 
 /** Doesn't change during the page's life, so we only look it up once. */
-let localeAndTimezone: { locale: string; timezone: string } | undefined;
+let localeAndTimezoneOnce: Pick<PageContext, 'locale' | 'timezone'> | undefined;
 /** Only set while replaying a held call. */
 let heldCall: HeldCall | undefined;
 
@@ -57,6 +57,24 @@ export function eventTime(): Date {
 }
 
 /**
+ * The browser's language (BCP 47) and time zone (IANA), for events and the push
+ * registration. One it can't say is left out, never sent empty.
+ */
+export function localeAndTimezone(): Pick<PageContext, 'locale' | 'timezone'> {
+  if (localeAndTimezoneOnce) return localeAndTimezoneOnce;
+  const found: Pick<PageContext, 'locale' | 'timezone'> = {};
+  const locale = typeof navigator === 'undefined' ? undefined : navigator.language;
+  if (locale) found.locale = locale;
+  try {
+    const { timeZone } = Intl.DateTimeFormat().resolvedOptions();
+    if (timeZone) found.timezone = timeZone;
+  } catch {
+    // Some embedded browsers throw for a time zone they can't name: leave it out.
+  }
+  return (localeAndTimezoneOnce = found);
+}
+
+/**
  * Page info for an event's `context`, collected as Segment's analytics.js collects it.
  * Kirora cuts values longer than it keeps, so none are cut here. The page's markup is the
  * site's, so a malformed address in it is left out (or the page's
@@ -64,10 +82,6 @@ export function eventTime(): Date {
  */
 export function pageContext(): PageContext {
   if (typeof location === 'undefined' || typeof document === 'undefined') return {};
-  localeAndTimezone ??= {
-    locale: navigator.language,
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-  };
 
   // During a replay, the page is the one the loader saw when the call was made.
   const address = urlOf(heldCall?.href) ?? new URL(location.href);
@@ -86,7 +100,7 @@ export function pageContext(): PageContext {
   };
   if (referrer) page.referrer = withoutFragment(referrer);
 
-  const context: PageContext = { ...localeAndTimezone, page };
+  const context: PageContext = { ...localeAndTimezone(), page };
   const campaign = campaignTags(address);
   if (Object.keys(campaign).length > 0) context.campaign = campaign;
   return context;

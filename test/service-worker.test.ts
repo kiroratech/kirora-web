@@ -77,3 +77,68 @@ it("leaves other services' pushes and unreadable payloads alone", async () => {
   ).toBeUndefined();
   expect(await deliver('not json')).toBeUndefined();
 });
+
+/** Delivers a push without clicking it, and what it reported meanwhile. */
+async function show(push: Record<string, unknown>) {
+  const before = reported.length;
+  const waits: Promise<unknown>[] = [];
+  listeners.push!({
+    data: { json: () => push },
+    waitUntil: (promise: Promise<unknown>) => void waits.push(promise),
+  });
+  await Promise.allSettled(waits);
+  return reported.slice(before);
+}
+
+it('reports a push as delivered once it is on screen', async () => {
+  const shownBefore = shown.length;
+  const reports = await show({
+    kirora: 1,
+    title: 'Your order shipped',
+    trackingUrl: 'https://api.example.com/t/p/ghi',
+  });
+  expect(shown).toHaveLength(shownBefore + 1);
+  expect(reports).toEqual([
+    { url: 'https://api.example.com/t/p/ghi', body: { event: 'delivered' } },
+  ]);
+});
+
+it('reports no delivery for a test push, or a push that could not be shown', async () => {
+  expect(await show({ kirora: 1, title: 'Test notification' })).toEqual([]);
+
+  const { registration } = self as unknown as {
+    registration: { showNotification: (...args: unknown[]) => Promise<void> };
+  };
+  const showNotification = registration.showNotification;
+  registration.showNotification = () => Promise.reject(new TypeError('No permission'));
+  try {
+    expect(
+      await show({ kirora: 1, title: 'Hi', trackingUrl: 'https://t/p/jkl' }),
+    ).toEqual([]);
+  } finally {
+    registration.showNotification = showNotification;
+  }
+});
+
+it('tries a failed delivery report once more, then drops it', async () => {
+  const recordAndAnswer = fetch;
+  let attempts = 0;
+  const answering = (status: number) => {
+    vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+      attempts++;
+      return recordAndAnswer(url, init).then(() => new Response(null, { status }));
+    });
+  };
+  const push = { kirora: 1, title: 'Hi', trackingUrl: 'https://t/p/mno' };
+  try {
+    answering(503);
+    expect(await show(push)).toHaveLength(2);
+    expect(attempts).toBe(2);
+    // An expired or altered token is refused for good: no second try.
+    answering(400);
+    expect(await show(push)).toHaveLength(1);
+    expect(attempts).toBe(3);
+  } finally {
+    vi.stubGlobal('fetch', recordAndAnswer);
+  }
+});
