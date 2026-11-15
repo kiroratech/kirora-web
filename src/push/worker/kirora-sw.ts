@@ -6,8 +6,8 @@ declare const self: ServiceWorkerGlobalScope;
 
 /** As Kirora sends it. Every field may be missing from an older or newer server. */
 type KiroraPush = {
-  /** Marks the payload as Kirora's, tracked or not. */
-  kirora?: number;
+  /** Marks the payload as Kirora's, tracked or not: `"true"`, or `1` from older servers. */
+  kirora?: string | number;
   title?: string;
   body?: string;
   actionUrl?: string;
