@@ -370,3 +370,124 @@ it("registers with the browser's language and time zone, and nothing else about 
     false,
   );
 });
+
+/** Blocks notifications in the stubbed browser, as a user does in site settings. */
+function denyNotifications() {
+  vi.stubGlobal('Notification', {
+    permission: 'denied',
+    requestPermission: () => Promise.resolve('denied'),
+  });
+}
+
+function denials(requests: SentRequest[]) {
+  return requests.filter(
+    (request) =>
+      request.method === 'PUT' &&
+      (request.body as { permission?: string }).permission === 'denied',
+  );
+}
+
+it('tells Kirora when notifications are blocked, naming the last registration', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  await pushClient().identify(tokenFor('alice'));
+  denyNotifications();
+
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  // Reported once a day, not on every start.
+  await pushClient().identify(tokenFor('alice'));
+
+  expect(denials(server.requests).map((request) => request.body)).toEqual([
+    {
+      pushAppId: 'app_web',
+      permission: 'denied',
+      lastSeenAt: '2026-11-01T00:00:01.000Z',
+      locale: 'en',
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    },
+  ]);
+  // The denial's answer is kept: a take-over advances it.
+  const saved = JSON.parse(localStorage.getItem(REGISTRATION_KEY)!) as {
+    lastSeenAt: string;
+  };
+  expect(saved.lastSeenAt).toBe('2026-11-01T00:00:02.000Z');
+
+  // Another user on this browser takes the device over with their denial.
+  await kirora.identify(tokenFor('bob'));
+  expect(denials(server.requests).map((request) => request.user)).toEqual([
+    'alice',
+    'bob',
+  ]);
+  expect(denials(server.requests)[1]!.body).toMatchObject({
+    lastSeenAt: '2026-11-01T00:00:02.000Z',
+  });
+});
+
+it('says nothing about a block in a browser never registered', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  denyNotifications();
+  const server = fakeKirora();
+  const kirora = pushClient();
+
+  await kirora.identify(tokenFor('alice'));
+  expect(await kirora.requestPushPermission()).toBe('denied');
+
+  expect(
+    server.requests.filter((request) => request.path.startsWith('/devices/')),
+  ).toEqual([]);
+});
+
+it.each([404, 409])(
+  'forgets the registration when Kirora answers a denial with %i',
+  async (status) => {
+    stubLocalStorage();
+    stubWebPush();
+    const server = fakeKirora(undefined, (request) =>
+      denials([request]).length > 0 ? new Response(null, { status }) : undefined,
+    );
+    await pushClient().identify(tokenFor('alice'));
+    denyNotifications();
+
+    await pushClient().identify(tokenFor('alice'));
+    await pushClient().identify(tokenFor('alice'));
+
+    expect(denials(server.requests)).toHaveLength(1);
+    expect(savedRegistration()).toBeUndefined();
+  },
+);
+
+it('registers again once notifications are allowed after a block', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  await pushClient().identify(tokenFor('alice'));
+  denyNotifications();
+  await pushClient().identify(tokenFor('alice'));
+  vi.stubGlobal('Notification', { permission: 'granted' });
+
+  await pushClient().identify(tokenFor('alice'));
+
+  const permissions = server.requests
+    .filter((request) => request.method === 'PUT')
+    .map((request) => (request.body as { permission: string }).permission);
+  expect(permissions).toEqual(['granted', 'denied', 'granted']);
+});
+
+it('still answers denied when telling Kirora about it fails', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora(undefined, (request) =>
+    denials([request]).length > 0 ? new Response(null, { status: 503 }) : undefined,
+  );
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  denyNotifications();
+
+  expect(await kirora.requestPushPermission()).toBe('denied');
+  expect(denials(server.requests)).toHaveLength(1);
+  // Kept, to try again on the next start.
+  expect(savedRegistration()).toBe('alice');
+});
