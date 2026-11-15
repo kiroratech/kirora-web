@@ -46,7 +46,7 @@ async function deliver(data: string, action = '') {
 
 it('shows a campaign push and reports the click', async () => {
   const push = JSON.stringify({
-    kirora: 1,
+    kirora: 'true',
     title: 'Your invoice is ready',
     actionUrl: 'https://example.com/invoices/1',
     trackingUrl: 'https://api.example.com/t/p/abc',
@@ -61,7 +61,7 @@ it('shows a campaign push and reports the click', async () => {
 
 it('shows a test push, which has no tracking URL, without reporting it', async () => {
   const reports = reported.length;
-  const push = JSON.stringify({ kirora: 1, title: 'Test notification' });
+  const push = JSON.stringify({ kirora: 'true', title: 'Test notification' });
   expect((await deliver(push))?.title).toBe('Test notification');
   expect(reported).toHaveLength(reports);
 });
@@ -93,7 +93,7 @@ async function show(push: Record<string, unknown>) {
 it('reports a push as delivered once it is on screen', async () => {
   const shownBefore = shown.length;
   const reports = await show({
-    kirora: 1,
+    kirora: 'true',
     title: 'Your order shipped',
     trackingUrl: 'https://api.example.com/t/p/ghi',
   });
@@ -111,7 +111,7 @@ it('reports no delivery for a push that could not be shown', async () => {
   registration.showNotification = () => Promise.reject(new TypeError('No permission'));
   try {
     expect(
-      await show({ kirora: 1, title: 'Hi', trackingUrl: 'https://t/p/jkl' }),
+      await show({ kirora: 'true', title: 'Hi', trackingUrl: 'https://t/p/jkl' }),
     ).toEqual([]);
   } finally {
     registration.showNotification = showNotification;
@@ -129,7 +129,7 @@ it('tries a failed report once more, then drops it', async () => {
     });
     return () => attempts;
   };
-  const push = { kirora: 1, title: 'Hi', trackingUrl: 'https://t/p/mno' };
+  const push = { kirora: 'true', title: 'Hi', trackingUrl: 'https://t/p/mno' };
   try {
     for (const status of [503, 429]) {
       const attempts = answering(status);
