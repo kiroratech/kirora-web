@@ -23,7 +23,15 @@ type PushRegistration = {
   /** What the subscription was made with, for browsers that can't say. */
   vapidPublicKey?: string;
   at: number;
+  /** Kirora's, from its answer: a denial names it. Missing from older records. */
+  pushAppId?: string;
+  lastSeenAt?: string;
+  /** Set once Kirora was told permission is denied. */
+  denied?: true;
 };
+
+/** What Kirora answers to `PUT /devices/{id}`. */
+type DeviceAnswer = { lastSeenAt?: string } | undefined;
 
 const DEFAULT_SERVICE_WORKER_URL = '/kirora-sw.js';
 const WORKER_ACTIVATION_TIMEOUT_MS = 30_000;
@@ -57,12 +65,19 @@ export class WebPush {
     if (!this.options || !webPushSupported()) return 'unsupported';
     const permission = await Notification.requestPermission();
     if (permission === 'granted') await this.register();
+    // Reported too, but a failed report doesn't change the answer.
+    if (permission === 'denied') {
+      await this.register().catch((error: unknown) => {
+        this.log('error', "Couldn't tell Kirora notifications are blocked", error);
+      });
+    }
     // `default` means the prompt was dismissed.
     return permission === 'default' ? 'unanswered' : permission;
   }
 
   /**
-   * Registers this browser for push as the user signed in now, if permission is granted.
+   * Registers this browser for push as the user signed in now, if permission is granted,
+   * or tells Kirora it's denied.
    * Gives up as soon as someone else signs in (or nobody is), so an earlier user's
    * registration never lands after a later one's.
    */
@@ -76,8 +91,9 @@ export class WebPush {
     const { options } = this;
     const current = () => this.identity.user === user;
     if (!options || !current() || !webPushSupported()) return;
-    if (Notification.permission !== 'granted') return;
     const config = this.config(options);
+    if (Notification.permission === 'denied') return this.reportDenied(user, config);
+    if (Notification.permission !== 'granted') return;
     if ((await this.registrationIsFresh(user.subject, config)) || !current()) return;
     // Independent, so done together: which app to use, and a worker ready to subscribe.
     const [pushApp, worker] = await Promise.all([
@@ -91,17 +107,21 @@ export class WebPush {
       this.lastRegistration(),
     );
     if (!current()) return;
-    await this.api.request('PUT', `/devices/${this.installationId()}`, {
-      as: user,
-      body: {
-        pushAppId: pushApp.pushAppId,
-        targetKind: 'web_push_subscription',
-        permission: 'granted',
-        subscription,
-        // For push reports. No app or OS version: Kirora reads the user agent.
-        ...localeAndTimezone(),
+    const answer = await this.api.request<DeviceAnswer>(
+      'PUT',
+      `/devices/${this.installationId()}`,
+      {
+        as: user,
+        body: {
+          pushAppId: pushApp.pushAppId,
+          targetKind: 'web_push_subscription',
+          permission: 'granted',
+          subscription,
+          // For push reports. No app or OS version: Kirora reads the user agent.
+          ...localeAndTimezone(),
+        },
       },
-    });
+    );
     // Saved even if the user changed meanwhile: it records who Kirora now has, so the
     // next user's registration (queued behind this one) isn't skipped as fresh.
     const registration: PushRegistration = {
@@ -110,9 +130,56 @@ export class WebPush {
       endpoint: subscription.endpoint!,
       vapidPublicKey: pushApp.vapidPublicKey,
       at: Date.now(),
+      pushAppId: pushApp.pushAppId,
+      lastSeenAt: answer?.lastSeenAt,
     };
     this.storage.setItem(this.registrationKey, JSON.stringify(registration));
     this.log('debug', `Registered this browser with ${pushApp.name}`);
+  }
+
+  /**
+   * Tells Kirora this browser's permission is denied, so it stops counting the browser as
+   * reachable, and the device moves to `user` if someone else registered it. Only a
+   * browser registered before can say so: the denial names that registration.
+   */
+  private async reportDenied(user: SignedInUser, config: string): Promise<void> {
+    const last = this.lastRegistration();
+    if (!last?.pushAppId || !last.lastSeenAt || last.config !== config) return;
+    const reported = last.denied && last.userSubject === user.subject;
+    if (reported && Date.now() - last.at <= REGISTRATION_REFRESH_MS) return;
+    let answer: DeviceAnswer;
+    try {
+      answer = await this.api.request<DeviceAnswer>(
+        'PUT',
+        `/devices/${this.installationId()}`,
+        {
+          as: user,
+          body: {
+            pushAppId: last.pushAppId,
+            permission: 'denied',
+            lastSeenAt: last.lastSeenAt,
+            ...localeAndTimezone(),
+          },
+        },
+      );
+    } catch (error) {
+      // 409: registered again somewhere this browser doesn't know. 404: not this user's
+      // device, or none. Nothing to say either way until permission is granted again.
+      const final = error instanceof KiroraApiError && [404, 409].includes(error.status);
+      if (!final) throw error;
+      this.storage.removeItem(this.registrationKey);
+      return;
+    }
+    const denial: PushRegistration = {
+      ...last,
+      userSubject: user.subject,
+      at: Date.now(),
+      // A denial that moved the device to this user advances it.
+      lastSeenAt: answer?.lastSeenAt ?? last.lastSeenAt,
+      denied: true,
+    };
+    this.storage.setItem(this.registrationKey, JSON.stringify(denial));
+    this.log('debug', 'Told Kirora notifications are blocked in this browser');
   }
 
   get registered(): boolean {
@@ -174,7 +241,9 @@ export class WebPush {
     config: string,
   ): Promise<boolean> {
     const last = this.lastRegistration();
-    if (!last || Date.now() - last.at > REGISTRATION_REFRESH_MS) return false;
+    if (!last || last.denied || Date.now() - last.at > REGISTRATION_REFRESH_MS) {
+      return false;
+    }
     if (last.userSubject !== userSubject || last.config !== config) return false;
     return last.endpoint === (await currentSubscription(this.serviceWorkerUrl))?.endpoint;
   }

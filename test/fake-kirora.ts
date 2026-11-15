@@ -119,11 +119,16 @@ export type SentRequest = {
 };
 
 /**
- * Stubs `fetch` with a Kirora that answers every call: events accepted, a push app, and
+ * Stubs `fetch` with a Kirora that answers every call: events accepted, a push app, a
+ * device registration with its `lastSeenAt` (`registrationAnswer` can replace it), and
  * 204 otherwise. Calls `hold` picks wait until `release()`. `requests` are in the order
  * they were sent, `handled` in the order Kirora acted on them, which a held call changes.
  */
-export function fakeKirora(hold: (request: SentRequest) => boolean = () => false) {
+export function fakeKirora(
+  hold: (request: SentRequest) => boolean = () => false,
+  registrationAnswer?: (request: SentRequest) => Response | undefined,
+) {
+  let registrations = 0;
   const requests: SentRequest[] = [];
   const handled: SentRequest[] = [];
   const held: (() => void)[] = [];
@@ -142,6 +147,14 @@ export function fakeKirora(hold: (request: SentRequest) => boolean = () => false
         return Response.json({
           data: { pushAppId: 'app_web', name: 'Web', vapidPublicKey: PUSH_APP_KEY },
         });
+      }
+      if (request.method === 'PUT' && request.path.startsWith('/devices/')) {
+        registrations += 1;
+        const lastSeenAt = new Date(Date.UTC(2026, 10, 1, 0, 0, registrations));
+        return (
+          registrationAnswer?.(request) ??
+          Response.json({ data: { lastSeenAt: lastSeenAt.toISOString() } })
+        );
       }
       return new Response(null, { status: 204 });
     };

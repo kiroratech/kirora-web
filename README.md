@@ -266,6 +266,11 @@ are separate settings.
 Browser permission and marketing consent are separate: `setPushConsent()` records whether
 the user agreed to receive marketing pushes.
 
+If the user blocks notifications for your site, the SDK tells Kirora the next time
+someone signs in on this browser, or when they answer the prompt with a block. Kirora
+then stops counting the browser as reachable. Only a browser that was registered before
+is reported.
+
 On iPhone and iPad, web push needs iOS 16.4 or later and only works once the site has been
 added to the home screen. Otherwise, `requestPushPermission()` returns `unsupported`.
 
@@ -443,7 +448,8 @@ name or whose properties aren't an object, which isn't tracked.
   fragments are dropped. Remove tokens and personal data from your addresses before the
   SDK tracks a page (see [Page views](#page-views)).
 - **Push reporting.** To report how push notifications perform, the SDK sends:
-  - the browser's language and time zone, when it registers the browser for push;
+  - the browser's language and time zone, when it registers the browser for push or
+    reports that notifications are blocked;
   - when a Kirora notification is shown or tapped.
 
   It never sends hardware or advertising identifiers. Kirora reads the browser and OS
