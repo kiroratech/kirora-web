@@ -8,6 +8,7 @@ import {
   tokenFor,
   type SentRequest,
 } from './fake-kirora.js';
+import { stubIndexedDB } from './fake-indexeddb.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -489,5 +490,35 @@ it('still answers denied when telling Kirora about it fails', async () => {
   expect(await kirora.requestPushPermission()).toBe('denied');
   expect(denials(server.requests)).toHaveLength(1);
   // Kept, to try again on the next start.
+  expect(savedRegistration()).toBe('alice');
+});
+
+it('keeps the registered subscription for the service worker', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const stores = stubIndexedDB();
+  fakeKirora();
+  await pushClient({ apiUrl: 'https://api.example.com/' }).identify(tokenFor('alice'));
+
+  expect(stores.get('subscriptions')?.get('https://example.com/')).toMatchObject({
+    url: 'https://api.example.com/client/v1/push-subscription-change',
+    clientKey: 'kirora_pk_a',
+    sdk: expect.stringMatching(/^kirora-web\//) as unknown,
+    vapidPublicKey: PUSH_APP_KEY,
+    subscription: { endpoint: 'https://push.example.com/subscription' },
+  });
+});
+
+it('registers all the same where IndexedDB is refused', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  vi.stubGlobal('indexedDB', {
+    open: () => {
+      throw new DOMException('Private window', 'InvalidStateError');
+    },
+  });
+  const server = fakeKirora();
+  await pushClient().identify(tokenFor('alice'));
+  expect(deviceChanges(server.handled)).toEqual(['alice']);
   expect(savedRegistration()).toBe('alice');
 });
