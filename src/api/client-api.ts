@@ -5,7 +5,7 @@ import { withTimeout } from '../utils/timeout.js';
 import { urlOf } from '../utils/url.js';
 import { SDK_VERSION } from '../version.js';
 
-const SDK_NAME = `kirora-web/${SDK_VERSION}`;
+export const SDK_NAME = `kirora-web/${SDK_VERSION}`;
 const DEFAULT_API_URL = 'https://api.kirora.io';
 
 type ClientApiOptions = Pick<KiroraOptions, 'apiUrl' | 'clientKey'>;
@@ -28,8 +28,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
  */
 export class ClientApi {
   /** Undefined if `apiUrl` isn't an address: then every request fails with `urlProblem`. */
-  private readonly baseUrl: string | undefined;
-  private readonly clientKey: string;
+  readonly baseUrl: string | undefined;
+  readonly clientKey: string;
   /** Keeps one workspace's stored state apart from another's on the same site. */
   readonly namespace: string;
   /** Why `apiUrl` can't be used, if it can't. The constructor never throws. */
