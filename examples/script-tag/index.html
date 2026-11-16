@@ -28,6 +28,7 @@
           'track',
           'trackPageView',
           'setPushConsent',
+          'setPushEnabled',
           'setTrackingConsent',
         ].forEach(function (method) {
           kirora[method] = function () {
@@ -116,13 +117,10 @@
       document.getElementById('sign-out').addEventListener('click', function () {
         // Before your own sign-out, so queued events go as this user. Calls made before
         // the SDK loads are queued and return nothing, so wait only once it has loaded.
-        Promise.resolve(kirora.logout())
-          .catch(function (error) {
-            console.error('Kirora logout failed', error);
-          })
-          .then(function () {
-            document.getElementById('sign-out-form').submit();
-          });
+        // logout() never rejects and returns within 5 seconds.
+        Promise.resolve(kirora.logout()).then(function () {
+          document.getElementById('sign-out-form').submit();
+        });
       });
       document.getElementById('push').addEventListener('click', function () {
         var result = document.getElementById('push-result');
