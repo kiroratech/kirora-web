@@ -8,7 +8,7 @@ import { deviceStorage, type KeyValueStorage } from './storage/device-storage.js
 import { STORAGE_KEYS } from './storage/keys.js';
 import { siteStorage } from './storage/site-storage.js';
 import { TrackingConsent } from './tracking/consent.js';
-import { removeInstallationId, installationId } from './tracking/installation-id.js';
+import { installationId } from './tracking/installation-id.js';
 import { watchPageViews } from './tracking/page-context.js';
 import { watchPageLifecycle } from './tracking/page-lifecycle.js';
 import { SESSION_KEEPALIVE_MS } from './tracking/session.js';
@@ -71,8 +71,8 @@ export class Kirora {
     const storage = deviceStorage((error) =>
       this.log(
         'error',
-        "Can't save to localStorage: events will be lost on reload, and a saved tracking " +
-          'consent no longer counts until setTrackingConsent(true) is called again',
+        "Can't save to localStorage: events are lost on reload, and saved tracking " +
+          'consent needs setTrackingConsent(true) again',
         error,
       ),
     );
@@ -100,16 +100,15 @@ export class Kirora {
       this.consent,
       this.log,
     );
+    const deviceId = () => installationId(this.siteStorage, this.installationIdKey);
     this.tracker = new Tracker({
       identity: this.identity,
       queue: this.queue,
       delivery: this.delivery,
       consent: this.consent,
       siteStorage: this.siteStorage,
-      keys: {
-        session: STORAGE_KEYS.session(namespace),
-        installationId: this.installationIdKey,
-      },
+      sessionKey: STORAGE_KEYS.session(namespace),
+      deviceId,
       trackSessions: options.trackSessions !== false,
       beforeSend:
         typeof options.beforeSend === 'function' ? options.beforeSend : undefined,
@@ -120,7 +119,7 @@ export class Kirora {
       this.identity,
       storage,
       options.push === true ? {} : options.push,
-      () => installationId(this.siteStorage, this.installationIdKey),
+      deviceId,
       this.log,
     );
     // What's stored from before the visitor refused, e.g. before consent was required.
@@ -141,9 +140,10 @@ export class Kirora {
           onHidden: sendNow,
           onOnline: sendNow,
           // Returning is activity, and time on a visible page never ends a visit.
+          // Also the time to send an event too large to go while the page was hidden.
           onReturn: () => {
             this.tracker.noteActivity();
-            this.delivery.onVisible();
+            sendNow();
           },
           whileVisible: () => this.tracker.keepSessionAlive(),
         },
@@ -318,7 +318,7 @@ export class Kirora {
   /** The device id is also the installation id, so a push registration still needs it. */
   private forgetDeviceIdIfUnused(): void {
     if (!this.push.registered) {
-      removeInstallationId(this.siteStorage, this.installationIdKey);
+      this.siteStorage.removeItem(this.installationIdKey);
     }
   }
 

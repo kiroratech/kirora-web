@@ -1,5 +1,5 @@
 import type { EventDelivery } from '../events/event-delivery.js';
-import type { EventQueue, QueuedEvent } from '../events/event-queue.js';
+import type { EventOwner, EventQueue, QueuedEvent } from '../events/event-queue.js';
 import type { Identity } from '../identity/identity.js';
 import type { KeyValueStorage } from '../storage/device-storage.js';
 import type { BeforeSendEvent, EventProperties, KiroraOptions } from '../types.js';
@@ -7,7 +7,6 @@ import { jsonSnapshot, NotJsonError } from '../utils/json-snapshot.js';
 import type { Log } from '../utils/log.js';
 import { uuid } from '../utils/uuid.js';
 import type { TrackingConsent } from './consent.js';
-import { installationId } from './installation-id.js';
 import {
   eventTime,
   PAGE_VIEWED_EVENT,
@@ -31,15 +30,14 @@ type TrackerDependencies = {
   consent: Pick<TrackingConsent, 'allowed'>;
   /** Shared across subdomains, so `www.` and `app.` see the same device and session. */
   siteStorage: KeyValueStorage;
-  /** Where the session and `device.id` are kept, per workspace. */
-  keys: { session: string; installationId: string };
+  /** Where the session is kept, per workspace. */
+  sessionKey: string;
+  /** `device.id`, made on first use. */
+  deviceId: () => string;
   trackSessions: boolean;
   beforeSend: KiroraOptions['beforeSend'];
   log: Log;
 };
-
-/** An event's owner: who was signed in when it was tracked, or null for nobody. */
-type Owner = string | null;
 
 /**
  * Turns what the app tracks into queued events: their time, page, session and device,
@@ -92,11 +90,11 @@ export class Tracker {
   }
 
   private get sessionStore(): SessionStore {
-    return { storage: this.parts.siteStorage, key: this.parts.keys.session };
+    return { storage: this.parts.siteStorage, key: this.parts.sessionKey };
   }
 
   /** The user signed in now, who owns what's tracked now. */
-  private owner(): Owner {
+  private owner(): EventOwner {
     return this.parts.identity.user?.subject ?? null;
   }
 
@@ -128,7 +126,7 @@ export class Tracker {
   }
 
   /** Returns the session id, if sessions are on and tracking is allowed. */
-  private touchSession(owner: Owner, page?: PageContext): string | undefined {
+  private touchSession(owner: EventOwner, page?: PageContext): string | undefined {
     if (!this.sessionsOn) return undefined;
     const { sessionId, started } = touchSession(this.sessionStore, owner);
     if (started) {
@@ -167,7 +165,7 @@ export class Tracker {
    * is taken first, so a slow hook doesn't move it.
    */
   private capture(
-    owner: Owner,
+    owner: EventOwner,
     name: string,
     properties: EventProperties,
     page: PageContext,
@@ -181,7 +179,7 @@ export class Tracker {
         ...page,
         ...(sessionId ? { sessionId } : {}),
         device: {
-          id: installationId(this.parts.siteStorage, this.parts.keys.installationId),
+          id: this.parts.deviceId(),
         },
       },
     });
@@ -208,8 +206,12 @@ export class Tracker {
     let answer: unknown;
     this.inBeforeSend = true;
     try {
-      // A copy of its own, so the hook can't change what the SDK holds.
-      answer = beforeSend(jsonSnapshot(event) as BeforeSendEvent);
+      // The properties are already this event's own copy; the context shares the page
+      // with other events, so the hook gets a copy of its own.
+      answer = beforeSend({
+        ...event,
+        context: jsonSnapshot(event.context) as Record<string, unknown>,
+      });
     } catch {
       log('error', `${event.name} not tracked: beforeSend threw`);
       return undefined;
@@ -249,7 +251,7 @@ export class Tracker {
   }
 
   /** Queues as `owner`, then lets delivery decide when to send. */
-  private enqueue(event: QueuedEvent, owner: Owner): void {
+  private enqueue(event: QueuedEvent, owner: EventOwner): void {
     const { queue, delivery, log } = this.parts;
     queue.add(event, owner).then(
       (waiting) => delivery.onEventQueued(waiting),

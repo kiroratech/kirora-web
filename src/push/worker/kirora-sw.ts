@@ -4,7 +4,12 @@
 
 import { base64UrlBytes } from '../../utils/base64url.js';
 import { retryAfterMs } from '../../utils/retry-after.js';
-import { savedSubscription, type SavedSubscription } from '../subscription-store.js';
+import {
+  forgetSubscription,
+  readSubscription,
+  saveSubscription,
+  type SavedSubscription,
+} from '../subscription-store.js';
 
 declare const self: ServiceWorkerGlobalScope;
 
@@ -127,7 +132,7 @@ const MAX_RETRY_WAIT_MS = 60_000;
  */
 async function moveSubscription(event: PushSubscriptionChangeEvent): Promise<void> {
   const { scope, pushManager } = self.registration;
-  const saved = await savedSubscription(scope);
+  const saved = await readSubscription(scope);
   // Another service's subscription changed, or this browser never registered with Kirora.
   if (
     !saved ||
@@ -165,11 +170,11 @@ async function moveSubscription(event: PushSubscriptionChangeEvent): Promise<voi
     const status = response?.status ?? 0;
     if (status === 204) {
       const moved: SavedSubscription = { ...saved, subscription: newSubscription };
-      return void (await savedSubscription(scope, moved));
+      return void (await saveSubscription(scope, moved));
     }
     // 404: no device has the old subscription. 409: another device has the new one.
     if (status === 404 || status === 409) {
-      return void (await savedSubscription(scope, null));
+      return void (await forgetSubscription(scope));
     }
     const retry = status === 0 || status === 429 || status >= 500;
     if (!retry || attempt === MOVE_ATTEMPTS) return;

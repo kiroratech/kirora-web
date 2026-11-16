@@ -18,18 +18,18 @@ export type QueuedEvent = {
  * Who an event belongs to: the signed-in user's token subject when it was tracked, or
  * null before sign-in until a sign-in adopts it. Kept on the device only, never sent.
  */
-type EventOwner = string | null;
+export type EventOwner = string | null;
 
 type StoredEvent = { owner: EventOwner; event: QueuedEvent };
 
 /**
- * The queue as last read or written, the exact string stored for it and that string's
- * UTF-8 size. `exact` is false if reading dropped unreadable entries, so the string has
- * more than `stored`.
+ * The queue as last read or written, the exact string stored for it and, if it's been
+ * counted, that string's UTF-8 size. `exact` is false if reading dropped unreadable
+ * entries, so the string has more than `stored`.
  */
 type Cache = {
   json: string | null;
-  bytes: number;
+  bytes?: number;
   stored: StoredEvent[];
   exact: boolean;
 };
@@ -57,8 +57,12 @@ export class EventQueue {
    * write changes the string, so a mismatch means parse again; a match skips the parse.
    */
   private cache: Cache = { json: null, bytes: 0, stored: [], exact: true };
-  /** Events added this tick, not yet written: they're saved together, in one write. */
-  private batch: { stored: StoredEvent[]; written: Promise<number> } | undefined;
+  /**
+   * Events added this tick, not yet written, with each one's JSON: they're saved
+   * together, in one write.
+   */
+  private batch:
+    { stored: StoredEvent[]; jsons: string[]; written: Promise<number> } | undefined;
 
   constructor(
     private readonly storage: KeyValueStorage,
@@ -69,26 +73,30 @@ export class EventQueue {
 
   /** Returns how many events wait. Rejects an event too large to keep at all. */
   add(event: QueuedEvent, owner: EventOwner): Promise<number> {
+    const entry: StoredEvent = { owner, event };
+    // Encoded once, here: the write reuses it.
+    const json = JSON.stringify(entry);
     // `[` and `]` around it, were it the only one.
-    if (utf8Length(JSON.stringify({ owner, event })) + 2 > MAX_QUEUED_BYTES) {
+    if (mayExceed(json, 2) && utf8Length(json) + 2 > MAX_QUEUED_BYTES) {
       return Promise.reject(
         new KiroraError('the event is larger than the queue can keep'),
       );
     }
     if (this.batch) {
-      this.batch.stored.push({ owner, event });
+      this.batch.stored.push(entry);
+      this.batch.jsons.push(json);
       return this.batch.written;
     }
-    const stored = [{ owner, event }];
+    const batch = { stored: [entry], jsons: [json] };
     const written = this.exclusively(() => {
       // Later adds start a batch of their own.
-      if (this.batch?.stored === stored) this.batch = undefined;
+      if (this.batch?.stored === batch.stored) this.batch = undefined;
       this.read();
-      const { kept, json, bytes } = appended(this.cache, stored);
-      this.write(kept, json, bytes);
-      return kept.length;
+      const appending = appended(this.cache, batch.stored, batch.jsons);
+      this.write(appending.kept, appending.json, appending.bytes);
+      return appending.kept.length;
     });
-    this.batch = { stored, written };
+    this.batch = { ...batch, written };
     return written;
   }
 
@@ -108,19 +116,7 @@ export class EventQueue {
    * idempotency keys, for `release()`.
    */
   adopt(owner: string): Promise<Set<string>> {
-    return this.exclusively(() => {
-      const stored = this.read();
-      const adopted = new Set<string>();
-      for (const entry of stored) {
-        if (entry.owner === null) adopted.add(entry.event.idempotencyKey);
-      }
-      if (adopted.size > 0 || !this.cache.exact) {
-        this.write(
-          stored.map((entry) => (entry.owner === null ? { ...entry, owner } : entry)),
-        );
-      }
-      return adopted;
-    });
+    return this.reassign(null, owner);
   }
 
   /**
@@ -128,15 +124,9 @@ export class EventQueue {
    * out to have failed: they wait for the next sign-in again.
    */
   release(owner: string, keys: ReadonlySet<string>): Promise<void> {
-    return this.exclusively(() => {
-      const stored = this.read();
-      const released = (entry: StoredEvent) =>
-        entry.owner === owner && keys.has(entry.event.idempotencyKey);
-      if (!stored.some(released)) return;
-      this.write(
-        stored.map((entry) => (released(entry) ? { ...entry, owner: null } : entry)),
-      );
-    });
+    return this.reassign(owner, null, (event) => keys.has(event.idempotencyKey)).then(
+      () => undefined,
+    );
   }
 
   remove(idempotencyKeys: ReadonlySet<string>): Promise<void> {
@@ -158,6 +148,27 @@ export class EventQueue {
     return this.keep(() => false);
   }
 
+  /**
+   * Gives `to` the events of `from` that `picks` picks, in one locked step, and returns
+   * their idempotency keys.
+   */
+  private reassign(
+    from: EventOwner,
+    to: EventOwner,
+    picks: (event: QueuedEvent) => boolean = () => true,
+  ): Promise<Set<string>> {
+    return this.exclusively(() => {
+      const moved = new Set<string>();
+      const stored = this.read().map((entry) => {
+        if (entry.owner !== from || !picks(entry.event)) return entry;
+        moved.add(entry.event.idempotencyKey);
+        return { ...entry, owner: to };
+      });
+      if (moved.size > 0 || !this.cache.exact) this.write(stored);
+      return moved;
+    });
+  }
+
   /** Rewrites the queue without what `test` rejects, if that's anything or it's unreadable. */
   private keep(test: (stored: StoredEvent) => boolean): Promise<void> {
     return this.exclusively(() => {
@@ -170,16 +181,15 @@ export class EventQueue {
   /** The stored queue, parsed only if it changed since we last read or wrote it. */
   private read(): StoredEvent[] {
     const json = this.storage.getItem(this.key);
-    if (json !== this.cache.json) {
-      this.cache = { json, bytes: utf8Length(json ?? ''), ...parse(json) };
-    }
+    // Its size is only counted if an add needs it.
+    if (json !== this.cache.json) this.cache = { json, ...parse(json) };
     return this.cache.stored;
   }
 
   private write(
     stored: StoredEvent[],
     json = JSON.stringify(stored),
-    bytes = utf8Length(json),
+    bytes?: number,
   ): void {
     const empty = stored.length === 0;
     if (empty) this.storage.removeItem(this.key);
@@ -236,34 +246,50 @@ function parse(json: string | null): Pick<Cache, 'stored' | 'exact'> {
 }
 
 /**
- * The queue with `adding` at the end, dropping the oldest past the count or byte limit
- * (`add()` has refused any event over the limit alone), with its JSON and that JSON's
- * size. Built from the stored JSON when that matches the queue exactly, rather than
- * encoding up to a megabyte again per event.
+ * True if `json`, with `extra` bytes more, could be over the byte limit. UTF-8 takes at
+ * most 3 bytes a character, so most strings never need counting.
+ */
+function mayExceed(json: string, extra = 0): boolean {
+  return json.length * 3 + extra > MAX_QUEUED_BYTES;
+}
+
+/**
+ * The queue with `adding` (whose JSON is `addingJsons`) at the end, dropping the oldest
+ * past the count or byte limit (`add()` has refused any event over the limit alone), with
+ * its JSON and, if counted, that JSON's size. Built from the stored JSON when that matches
+ * the queue exactly, rather than encoding up to a megabyte again per event.
  */
 function appended(
   cache: Cache,
   adding: StoredEvent[],
-): { kept: StoredEvent[]; json: string; bytes: number } {
+  addingJsons: string[],
+): { kept: StoredEvent[]; json: string; bytes?: number } {
   const all = [...cache.stored, ...adding];
-  const addingJson = JSON.stringify(adding);
   // An array's JSON is `[` + its items' JSON joined by `,` + `]`.
-  const reuse = cache.exact && cache.json !== null && cache.stored.length > 0;
-  const json = reuse
-    ? `${cache.json!.slice(0, -1)},${addingJson.slice(1)}`
-    : JSON.stringify(all);
-  let bytes = reuse ? cache.bytes + utf8Length(addingJson) - 1 : utf8Length(json);
+  const items = addingJsons.join(',');
+  const reuse = cache.exact && cache.json !== null;
+  const before =
+    cache.stored.length === 0 ? null : reuse ? cache.json! : JSON.stringify(cache.stored);
+  const json = before === null ? `[${items}]` : `${before.slice(0, -1)},${items}]`;
+  let bytes: number | undefined;
+  if (mayExceed(json)) {
+    bytes =
+      reuse && cache.stored.length > 0 && cache.bytes !== undefined
+        ? cache.bytes + 1 + utf8Length(items)
+        : utf8Length(json);
+  }
   let first = 0;
   /** Where the kept items start in `json`. */
   let start = 1;
   while (
     first < all.length - 1 &&
-    (all.length - first > MAX_QUEUED_EVENTS || bytes > MAX_QUEUED_BYTES)
+    (all.length - first > MAX_QUEUED_EVENTS ||
+      (bytes !== undefined && bytes > MAX_QUEUED_BYTES))
   ) {
     // The item and the comma after it.
     const item = JSON.stringify(all[first]);
     start += item.length + 1;
-    bytes -= utf8Length(item) + 1;
+    if (bytes !== undefined) bytes -= utf8Length(item) + 1;
     first++;
   }
   return first === 0

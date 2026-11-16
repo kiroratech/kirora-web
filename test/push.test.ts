@@ -1,5 +1,4 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { Kirora, type KiroraOptions } from '../src/index.js';
 import {
   fakeKirora,
   PUSH_APP_KEY,
@@ -7,6 +6,7 @@ import {
   stubWebPush,
   tokenFor,
   type SentRequest,
+  pushClient,
 } from './fake-kirora.js';
 import { stubIndexedDB } from './fake-indexeddb.js';
 
@@ -15,16 +15,6 @@ afterEach(() => {
 });
 
 const REGISTRATION_KEY = 'kirora:push-registration:kirora_pk_a@api.kirora.io';
-
-function pushClient(options: Partial<KiroraOptions> = {}) {
-  return new Kirora({
-    clientKey: 'kirora_pk_a',
-    trackSessions: false,
-    push: true,
-    logLevel: 'none',
-    ...options,
-  });
-}
 
 /** Who Kirora was told owns this browser, in order: a user for a PUT, `-user` for a DELETE. */
 function deviceChanges(requests: SentRequest[]) {

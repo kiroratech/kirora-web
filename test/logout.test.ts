@@ -1,22 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { Kirora, type KiroraOptions } from '../src/index.js';
-import { fakeKirora, stubWebPush, tokenFor, userOf } from './fake-kirora.js';
+import { fakeKirora, stubWebPush, tokenFor, userOf, pushClient } from './fake-kirora.js';
 import { stubIndexedDB } from './fake-indexeddb.js';
 
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
-
-function pushClient(options: Partial<KiroraOptions> = {}) {
-  return new Kirora({
-    clientKey: 'kirora_pk_a',
-    trackSessions: false,
-    push: true,
-    logLevel: 'none',
-    ...options,
-  });
-}
 
 type Call = { method: string; path: string; user: string | undefined };
 

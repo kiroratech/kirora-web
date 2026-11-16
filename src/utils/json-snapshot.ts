@@ -37,19 +37,13 @@ export function jsonSnapshot(value: unknown): unknown {
       if (Object.prototype.toString.call(item) !== '[object Object]') {
         throw new NotJsonError('an object JSON has no form for, such as a Map');
       }
-      const copied: Record<string, unknown> = {};
-      for (const [key, member] of Object.entries(item)) {
-        if (member === undefined) continue;
-        // Defined, not assigned: assigning a key named `__proto__` would set the copy's
-        // prototype instead of keeping it as data.
-        Object.defineProperty(copied, key, {
-          value: copy(member),
-          enumerable: true,
-          writable: true,
-          configurable: true,
-        });
-      }
-      return copied;
+      // Built from entries, which defines each key as data: assigning a key named
+      // `__proto__` would set the copy's prototype instead.
+      return Object.fromEntries(
+        Object.entries(item)
+          .filter(([, member]) => member !== undefined)
+          .map(([key, member]) => [key, copy(member)]),
+      );
     } finally {
       ancestors.delete(item);
     }

@@ -13,7 +13,3 @@ export function installationId(storage: KeyValueStorage, key: string): string {
   storage.setItem(key, installationId);
   return installationId;
 }
-
-export function removeInstallationId(storage: KeyValueStorage, key: string): void {
-  storage.removeItem(key);
-}

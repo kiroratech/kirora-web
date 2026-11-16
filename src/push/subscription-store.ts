@@ -18,15 +18,35 @@ export type SavedSubscription = {
 const DATABASE = 'kirora-push';
 const STORE = 'subscriptions';
 
-/**
- * Reads (`value` missing), saves or, with `null`, deletes the subscription saved for the
- * worker at `scope`, one per worker as a worker has one subscription. Rejects where
- * IndexedDB is missing or refused, as in some private windows.
- */
-export function savedSubscription(
+/** The subscription saved for the worker at `scope`, if any. */
+export function readSubscription(scope: string): Promise<SavedSubscription | undefined> {
+  return withStore('readonly', (store) => store.get(scope)) as Promise<
+    SavedSubscription | undefined
+  >;
+}
+
+/** Saves the subscription for the worker at `scope`: one per worker, as it has one. */
+export async function saveSubscription(
   scope: string,
-  value?: SavedSubscription | null,
-): Promise<SavedSubscription | undefined> {
+  value: SavedSubscription,
+): Promise<void> {
+  await withStore('readwrite', (store) => store.put(value, scope));
+}
+
+/** Forgets the subscription saved for the worker at `scope`. */
+export async function forgetSubscription(scope: string): Promise<void> {
+  await withStore('readwrite', (store) => store.delete(scope));
+}
+
+/**
+ * Runs `request` on the store and resolves with its result once the transaction has
+ * completed (written, not just asked for). Rejects where IndexedDB is missing or
+ * refused, as in some private windows.
+ */
+function withStore(
+  mode: IDBTransactionMode,
+  request: (store: IDBObjectStore) => IDBRequest,
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const open = indexedDB.open(DATABASE, 1);
     open.onupgradeneeded = () => open.result.createObjectStore(STORE);
@@ -34,25 +54,11 @@ export function savedSubscription(
     open.onsuccess = () => {
       const database = open.result;
       try {
-        const transaction = database.transaction(
-          STORE,
-          value === undefined ? 'readonly' : 'readwrite',
-        );
-        const store = transaction.objectStore(STORE);
-        const request =
-          value === undefined
-            ? store.get(scope)
-            : value
-              ? store.put(value, scope)
-              : store.delete(scope);
-        // Settled once written, not just asked for.
+        const transaction = database.transaction(STORE, mode);
+        const asked = request(transaction.objectStore(STORE));
         transaction.oncomplete = () => {
           database.close();
-          resolve(
-            value === undefined
-              ? (request.result as SavedSubscription | undefined)
-              : undefined,
-          );
+          resolve(asked.result);
         };
         transaction.onerror = transaction.onabort = () => {
           database.close();
