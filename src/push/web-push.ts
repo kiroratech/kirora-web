@@ -36,13 +36,16 @@ type DeviceAnswer = { lastSeenAt?: string } | undefined;
 
 /**
  * Detaching a signed-out user's browser, retried in the background until it's done. The
- * user's token is kept in memory only, and never refreshed.
+ * user's token is kept in memory only.
  */
 type Cleanup = {
   user: SignedInUser;
   installationId: string;
-  /** The push app the browser was last registered with, if known. */
-  pushAppId: string | undefined;
+  /**
+   * When Kirora last registered the browser for the user, if known: Kirora then detaches
+   * only registrations up to then, so a late retry can't undo a newer one.
+   */
+  lastSeenAt: string | undefined;
   /** How long the next failure waits before trying again. */
   retryDelayMs: number;
   /** No retry after this (epoch ms). */
@@ -222,7 +225,6 @@ export class WebPush {
       lastSeenAt: answer?.lastSeenAt,
     };
     this.storage.setItem(this.registrationKey, JSON.stringify(registration));
-    this.finishCleanups(user, installationId, pushApp.pushAppId);
     // For the worker, to tell Kirora when the browser replaces this subscription.
     await saveSubscription(worker.scope, {
       url: `${this.api.baseUrl!}/push-subscription-change`,
@@ -276,7 +278,6 @@ export class WebPush {
       denied: true,
     };
     this.storage.setItem(this.registrationKey, JSON.stringify(denial));
-    this.finishCleanups(user, installationId, last.pushAppId);
     this.log('debug', 'Told Kirora notifications are blocked in this browser');
   }
 
@@ -289,8 +290,9 @@ export class WebPush {
    * once the first attempt ends, which gives up at `deadline` (epoch ms) if one is given.
    * Never rejects. If it fails, the browser's subscription is cancelled so no more pushes
    * show, and a network error, 429 or 5xx is retried in the background until it works, is
-   * refused for good, or a day has passed. Signing someone else in doesn't stop it: only
-   * their successful registration of this browser, which takes it over, does.
+   * refused for good, or a day has passed. Kirora decides whether a retry is still
+   * needed: it never detaches a registration made since (answering 409), whichever tab
+   * made it, nor one that moved to someone else.
    */
   detach(user: SignedInUser, deadline?: number): Promise<void> {
     const last = this.lastRegistration();
@@ -300,7 +302,7 @@ export class WebPush {
     const cleanup: Cleanup = {
       user,
       installationId: this.installationId(),
-      pushAppId: last.pushAppId,
+      lastSeenAt: last.lastSeenAt,
       retryDelayMs: FIRST_CLEANUP_RETRY_MS,
       giveUpAt: Date.now() + CLEANUP_GIVE_UP_MS,
     };
@@ -321,15 +323,17 @@ export class WebPush {
     first: boolean,
     deadline?: number,
   ): Promise<void> {
-    // Done meanwhile, by a registration that took the browser over.
     if (!this.cleanups.has(cleanup) || this.destroyed) return;
     // Forgotten now, so the user signing in again registers again.
     if (first && this.lastRegistration()?.userSubject === cleanup.user.subject) {
       this.storage.removeItem(this.registrationKey);
     }
     const remaining = deadline === undefined ? undefined : deadline - Date.now();
+    const since = cleanup.lastSeenAt
+      ? `?lastSeenAt=${encodeURIComponent(cleanup.lastSeenAt)}`
+      : '';
     try {
-      await this.api.request('DELETE', `/devices/${cleanup.installationId}`, {
+      await this.api.request('DELETE', `/devices/${cleanup.installationId}${since}`, {
         // While the user is still signed in, an expired token is refreshed as for any
         // call. Once they've signed out, a refresh finds them gone and gives up, so a
         // token never comes through the next user's fetchUserToken.
@@ -340,9 +344,14 @@ export class WebPush {
       this.log('debug', 'Detached this browser');
       return;
     } catch (error) {
-      // A 404 means there was nothing of this user's here to detach.
-      const nothingToDetach = error instanceof KiroraApiError && error.status === 404;
-      if (first && !nothingToDetach) await this.cancelSubscription();
+      // 409: the user registered the browser again since, which Kirora kept. 404: there
+      // was nothing of theirs here. Either way it's done, and the subscription is theirs.
+      const done = error instanceof KiroraApiError && [404, 409].includes(error.status);
+      if (done) {
+        this.cleanups.delete(cleanup);
+        return;
+      }
+      if (first) await this.cancelSubscription();
       const retryable = !(error instanceof KiroraApiError) || error.retryable;
       const retryAt =
         Date.now() +
@@ -350,8 +359,8 @@ export class WebPush {
           cleanup.retryDelayMs,
           (error instanceof KiroraApiError && error.retryAfterMs) || 0,
         );
-      // Destroyed, or done by a registration, while this attempt was on its way.
-      if (this.destroyed || !this.cleanups.has(cleanup)) return;
+      // Destroyed while this attempt was on its way.
+      if (this.destroyed) return;
       if (!retryable || retryAt > cleanup.giveUpAt) {
         this.cleanups.delete(cleanup);
         this.log('error', "Couldn't detach this browser from the signed-out user", error);
@@ -362,26 +371,6 @@ export class WebPush {
       cleanup.timer = setTimeout(() => {
         void this.oneAtATime(() => this.attemptCleanup(cleanup, false));
       }, retryAt - Date.now());
-    }
-  }
-
-  /**
-   * After `user` registered this browser with `pushAppId`: detachments it makes needless
-   * end. Its own earlier one would undo it if it landed now, and another user's for the
-   * same push app is done, as the browser has moved. Another user's for another push
-   * app carries on: Kirora only detaches that user's own installations.
-   */
-  private finishCleanups(
-    user: SignedInUser,
-    installationId: string,
-    pushAppId: string | undefined,
-  ): void {
-    for (const cleanup of this.cleanups) {
-      const sameApp = cleanup.pushAppId !== undefined && cleanup.pushAppId === pushAppId;
-      if (cleanup.installationId !== installationId) continue;
-      if (!sameApp && cleanup.user.subject !== user.subject) continue;
-      clearTimeout(cleanup.timer);
-      this.cleanups.delete(cleanup);
     }
   }
 

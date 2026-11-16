@@ -7,7 +7,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-type Call = { method: string; path: string; user: string | undefined };
+type Call = {
+  method: string;
+  path: string;
+  user: string | undefined;
+  /** A detach's `?lastSeenAt=`, if any. */
+  lastSeenAt: string | null;
+  /** The `lastSeenAt` of each user's latest registration Kirora answered. */
+  registered: ReadonlyMap<string | undefined, string>;
+};
 
 /**
  * The fake Kirora, but `override` may answer a call itself (or hang it, with a promise
@@ -19,18 +27,39 @@ function kiroraWith(
   fakeKirora();
   const fake = globalThis.fetch;
   const calls: string[] = [];
+  const registered = new Map<string | undefined, string>();
   vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+    const address = new URL(url);
     const call: Call = {
       method: init.method ?? 'GET',
-      path: new URL(url).pathname.replace('/client/v1', ''),
+      path: address.pathname.replace('/client/v1', ''),
       user: userOf(init),
+      lastSeenAt: address.searchParams.get('lastSeenAt'),
+      registered,
     };
     calls.push(
       `${call.method} ${call.path.replace(/\/devices\/.+/, '/devices')} ${call.user}`,
     );
-    return override(call) ?? fake(url, init);
+    const answer = override(call) ?? fake(url, init);
+    if (call.method !== 'PUT' || !call.path.startsWith('/devices/')) return answer;
+    return answer.then(async (response) => {
+      const body = (await response.clone().json()) as { data?: { lastSeenAt?: string } };
+      if (body.data?.lastSeenAt) registered.set(call.user, body.data.lastSeenAt);
+      return response;
+    });
   });
   return calls;
+}
+
+/**
+ * Kirora's answer to a detach naming `lastSeenAt`: 409 if the user has registered the
+ * device since, which it keeps; otherwise 204.
+ */
+function conditionalDetach(call: Call): Promise<Response> {
+  const latest = call.registered.get(call.user);
+  const since =
+    latest !== undefined && call.lastSeenAt !== null && latest > call.lastSeenAt;
+  return Promise.resolve(new Response(null, { status: since ? 409 : 204 }));
 }
 
 const deletes = (calls: string[]) => calls.filter((call) => call.startsWith('DELETE'));
@@ -135,21 +164,67 @@ it("keeps retrying A's detachment past B's failed registration", async () => {
   kirora.destroy();
 });
 
-it("ends A's detachment once B's registration takes the browser over", async () => {
+it('names the last registration when detaching', async () => {
+  stubWebPush();
+  stubIndexedDB();
+  let named: [string | null, string | undefined] | undefined;
+  kiroraWith((call) => {
+    if (call.method === 'DELETE')
+      named = [call.lastSeenAt, call.registered.get(call.user)];
+    return undefined;
+  });
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('ada'));
+  await kirora.logout();
+  expect(named?.[0]).toEqual(expect.any(String));
+  expect(named?.[0]).toBe(named?.[1]);
+  kirora.destroy();
+});
+
+it("stops A's late detach once A registers again, and keeps the subscription", async () => {
   stubWebPush();
   stubIndexedDB();
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
-  const calls = kiroraWith((call) =>
-    call.method === 'DELETE' ? unavailable() : undefined,
-  );
+  let offline = true;
+  const calls = kiroraWith((call) => {
+    if (call.method !== 'DELETE') return undefined;
+    return offline ? unavailable() : conditionalDetach(call);
+  });
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('ada'));
+  await kirora.logout();
+  // Ada signs in again, in this tab or another: a new registration.
+  await kirora.identify(tokenFor('ada'));
+  expect(puts(calls)).toEqual(['PUT /devices ada', 'PUT /devices ada']);
+
+  offline = false;
+  await vi.advanceTimersByTimeAsync(60 * 60_000);
+  // The late retry named the earlier registration: Kirora answered 409 and kept hers.
+  expect(deletes(calls)).toEqual(['DELETE /devices ada', 'DELETE /devices ada']);
+  expect(await subscription()).not.toBeNull();
+  kirora.destroy();
+});
+
+it("finishes A's late detach harmlessly once B has the browser", async () => {
+  stubWebPush();
+  stubIndexedDB();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  let offline = true;
+  const calls = kiroraWith((call) => {
+    if (call.method !== 'DELETE') return undefined;
+    return offline ? unavailable() : conditionalDetach(call);
+  });
   const kirora = pushClient();
   await kirora.identify(tokenFor('ada'));
   await kirora.logout();
   await kirora.identify(tokenFor('bob'));
-  expect(puts(calls)).toEqual(['PUT /devices ada', 'PUT /devices bob']);
 
+  offline = false;
   await vi.advanceTimersByTimeAsync(60 * 60_000);
-  expect(deletes(calls)).toEqual(['DELETE /devices ada']);
+  // Kirora only detaches Ada's: Bob's registration and subscription stay.
+  expect(deletes(calls)).toEqual(['DELETE /devices ada', 'DELETE /devices ada']);
+  expect(await subscription()).not.toBeNull();
+  expect(await kirora.getPushStatus()).toBe('enabled');
   kirora.destroy();
 });
 
