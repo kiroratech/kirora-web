@@ -40,6 +40,8 @@ type DeviceAnswer = { lastSeenAt?: string } | undefined;
  */
 type Cleanup = {
   user: SignedInUser;
+  /** True at logout: the user is leaving, so their token is never refreshed. */
+  signingOut: boolean;
   installationId: string;
   /** The push app the browser was last registered with, if known. */
   pushAppId: string | undefined;
@@ -148,10 +150,10 @@ export class WebPush {
       !last.denied &&
       last.userSubject === user.subject &&
       last.config === this.config(this.options);
-    // The browser may have dropped the subscription Kirora has since.
+    // The browser may have dropped its subscription since. One the worker replaced (and
+    // told Kirora about) has a new endpoint, so any subscription counts.
     const subscribed = async () =>
-      (await currentSubscription(this.serviceWorkerUrl).catch(() => undefined))
-        ?.endpoint === last?.endpoint;
+      Boolean(await currentSubscription(this.serviceWorkerUrl).catch(() => undefined));
     return registered && (await subscribed()) ? 'enabled' : 'disabled';
   }
 
@@ -168,7 +170,7 @@ export class WebPush {
     }
     this.storage.setItem(this.disabledKey, '1');
     const { user } = this.identity;
-    if (user) await this.detach(user);
+    if (user) await this.detach(user, undefined, false);
     await this.oneAtATime(() => this.cancelSubscription());
   }
 
@@ -294,11 +296,12 @@ export class WebPush {
    * refused for good, or a day has passed. Signing someone else in doesn't stop it: only
    * their successful registration of this browser, which takes it over, does.
    */
-  detach(user: SignedInUser, deadline?: number): Promise<void> {
+  detach(user: SignedInUser, deadline?: number, signingOut = true): Promise<void> {
     const last = this.lastRegistration();
     if (!last) return Promise.resolve();
     const cleanup: Cleanup = {
       user,
+      signingOut,
       installationId: this.installationId(),
       pushAppId: last.pushAppId,
       retryDelayMs: FIRST_CLEANUP_RETRY_MS,
@@ -333,9 +336,10 @@ export class WebPush {
     try {
       await this.api.request('DELETE', `/devices/${cleanup.installationId}`, {
         as: cleanup.user,
-        // The user is signing out: their token isn't refreshed, least of all through the
-        // next user's fetchUserToken.
-        refresh: false,
+        // A user signing out has their token never refreshed, least of all through the
+        // next user's fetchUserToken. One still signed in (turning push off) does; once
+        // they've signed out, a refresh finds them gone and gives up.
+        refresh: !cleanup.signingOut,
         timeoutMs: remaining !== undefined && remaining > 0 ? remaining : undefined,
       });
       this.cleanups.delete(cleanup);
@@ -391,6 +395,14 @@ export class WebPush {
       }
     } catch (error) {
       this.log('error', "Couldn't cancel this browser's push subscription", error);
+    }
+    // Otherwise the worker could subscribe the browser again when the browser reports a
+    // subscription change.
+    try {
+      const worker = await navigator.serviceWorker.getRegistration(this.serviceWorkerUrl);
+      if (worker) await savedSubscription(worker.scope, null);
+    } catch (error) {
+      this.log('debug', "Couldn't forget the subscription kept for the worker", error);
     }
   }
 

@@ -131,9 +131,9 @@ export class ClientApi {
         response.body?.cancel().catch(() => undefined);
         return REFUSED;
       }
-      // Kirora took the token, whatever else it says.
-      user.confirmed = true;
       if (!response.ok) throw await toApiError(response);
+      // Only a success proves Kirora took the token: a proxy's 502 never looked at it.
+      user.confirmed = true;
       if (response.status === 204) return undefined;
       return ((await response.json()) as { data: unknown }).data;
     };

@@ -139,15 +139,20 @@ export class EventDelivery {
       this.identity.user === user && !this.destroyed && this.consent.allowed;
     while (mayStillSend()) {
       const hidden = isPageHidden();
-      const { batch, bytes } = fitBatch(
-        await this.queue.oldest(maxEvents, user.subject),
+      const oldest = await this.queue.oldest(maxEvents, user.subject);
+      // While hidden, an event too large for keepalive waits for the page to be shown
+      // again (a request without keepalive could be cut off as the tab closes); the
+      // events behind it still go.
+      const { batch } = fitBatch(
+        hidden
+          ? oldest.filter(
+              (event) => eventBytes(event) + ENVELOPE_BYTES <= MAX_KEEPALIVE_BYTES,
+            )
+          : oldest,
         hidden ? MAX_KEEPALIVE_BYTES : MAX_BATCH_BYTES,
       );
       // Consent may have been withdrawn, or the user changed, while the queue was read.
       if (batch.length === 0 || !mayStillSend()) return;
-      // A single event too large for keepalive waits for the page to be shown again: a
-      // request without keepalive could be cut off as the tab closes.
-      if (hidden && bytes > MAX_KEEPALIVE_BYTES) return;
       const outcome = await this.sendBatch(user, batch, hidden);
       if (outcome === 'split') {
         maxEvents = Math.ceil(batch.length / 2);
@@ -189,6 +194,8 @@ export class EventDelivery {
       this.log('debug', `Sent ${settled.size} events`);
       return settled;
     } catch (error) {
+      // Cancelled on purpose, as consent was withdrawn: not a failure to retry.
+      if (sending.signal.aborted) return 'stop';
       return this.classifyFailure(error, batchKeys);
     } finally {
       if (this.sending === sending) this.sending = undefined;
@@ -306,13 +313,18 @@ function fitBatch(
 ): { batch: QueuedEvent[]; bytes: number } {
   let bytes = ENVELOPE_BYTES;
   for (const [index, event] of events.entries()) {
-    const eventBytes = utf8Length(JSON.stringify(event)) + 1;
-    if (bytes + eventBytes > maxBytes && index > 0) {
+    const size = eventBytes(event);
+    if (bytes + size > maxBytes && index > 0) {
       return { batch: events.slice(0, index), bytes };
     }
-    bytes += eventBytes;
+    bytes += size;
   }
   return { batch: events, bytes };
+}
+
+/** An event's size in a batch: its JSON and the comma after it. */
+function eventBytes(event: QueuedEvent): number {
+  return utf8Length(JSON.stringify(event)) + 1;
 }
 
 /** ±10%, so clients don't all retry at the same moment. */
