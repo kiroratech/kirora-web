@@ -7,13 +7,22 @@ type SentEvent = {
   context: { sessionId?: string; device: { id: string }; page?: { url: string } };
 };
 
-/** Kirora's answer to `POST /events/batch` when it accepts every event: one result each. */
+/**
+ * Kirora's answer to `POST /events/batch` when it accepts every event: one receipt each,
+ * as Kirora writes it.
+ */
 export function accepted(batch: BodyInit | null | undefined | { events: unknown[] }) {
   const { events } = (typeof batch === 'string' ? JSON.parse(batch) : batch) as {
     events: { idempotencyKey: string }[];
   };
   return Response.json({
-    data: { results: events.map(({ idempotencyKey }) => ({ idempotencyKey })) },
+    data: {
+      results: events.map(({ idempotencyKey }) => ({
+        idempotencyKey,
+        replayed: false,
+        event: { idempotencyKey },
+      })),
+    },
   });
 }
 

@@ -244,3 +244,23 @@ it('gives back adopted events after a 502, as a gateway never checked the token'
   expect(sent).toEqual([['bob', 'Pricing Viewed']]);
   kirora.destroy();
 });
+
+it('never signs out a user who signs in just after logout() is called', async () => {
+  const server = fakeKirora();
+  const kirora = client({ trackSessions: false });
+  await kirora.identify(tokenFor('ada'));
+  kirora.track('Pricing Viewed');
+  const loggedOut = kirora.logout();
+  const bob = kirora.identify(tokenFor('bob'));
+  await Promise.all([loggedOut, bob]);
+
+  await kirora.setPushConsent(true);
+  expect(server.requests.at(-1)).toMatchObject({ path: '/push-consent', user: 'bob' });
+  // Ada's event is dropped with her logout, never sent as Bob.
+  kirora.track('Invoice Paid');
+  await kirora.flush();
+  expect(sentEvents(server.handled).map(({ user, name }) => [user, name])).toEqual([
+    ['bob', 'Invoice Paid'],
+  ]);
+  kirora.destroy();
+});

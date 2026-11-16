@@ -1,4 +1,5 @@
 import type { KeyValueStorage } from '../storage/device-storage.js';
+import { LockUnavailable, withCrossTabLock } from '../storage/cross-tab-lock.js';
 import { STORAGE_KEYS } from '../storage/keys.js';
 import { KiroraError } from '../errors.js';
 import { utf8Length } from '../utils/utf8.js';
@@ -192,22 +193,28 @@ export class EventQueue {
   }
 
   /**
-   * Runs `operation` under a cross-tab lock, or unlocked where Web Locks aren't supported.
-   * Operations run in the order they're asked for, so an add asked for after another
-   * operation joins no batch from before it.
+   * Runs `operation` under a lock every tab shares: a Web Lock, or where there are none,
+   * an IndexedDB transaction. Unlocked only where neither works (IndexedDB refused in a
+   * private window). Operations run in the order they're asked for, so an add asked for
+   * after another operation joins no batch from before it.
    */
   private exclusively<Result>(operation: () => Result): Promise<Result> {
     this.batch = undefined;
     const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
     // Always a tick later, even where a free lock is granted at once, so adds made in the
     // same tick have joined their batch by the time it's written.
-    return Promise.resolve().then(() =>
-      locks
-        ? // Async, so a throwing operation still releases the lock (Node keeps it otherwise).
-          // eslint-disable-next-line @typescript-eslint/require-await
-          locks.request(this.key, async () => operation())
-        : operation(),
-    );
+    return Promise.resolve().then(() => {
+      if (locks) {
+        // Async, so a throwing operation still releases the lock (Node keeps it otherwise).
+        // eslint-disable-next-line @typescript-eslint/require-await
+        return locks.request(this.key, async () => operation());
+      }
+      if (typeof indexedDB === 'undefined') return operation();
+      return withCrossTabLock(operation).catch((error: unknown) => {
+        if (error instanceof LockUnavailable) return operation();
+        throw error;
+      });
+    });
   }
 }
 

@@ -2,10 +2,12 @@ import { KiroraApiError, KiroraError } from '../errors.js';
 import type { Identity, SignedInUser } from '../identity/identity.js';
 import type { KiroraOptions } from '../types.js';
 import { withTimeout } from '../utils/timeout.js';
+import { retryAfterMs } from '../utils/retry-after.js';
 import { urlOf } from '../utils/url.js';
 import { SDK_VERSION } from '../version.js';
 
 export const SDK_NAME = `kirora-web/${SDK_VERSION}`;
+
 const DEFAULT_API_URL = 'https://api.kirora.io';
 
 type ClientApiOptions = Pick<KiroraOptions, 'apiUrl' | 'clientKey'>;
@@ -159,14 +161,4 @@ async function toApiError(response: Response): Promise<KiroraApiError> {
     body?.error?.message ?? `Kirora answered ${response.status}`,
     retryAfterMs(response.headers.get('retry-after')),
   );
-}
-
-/** `Retry-After` as seconds or an HTTP date (RFC 9110), in milliseconds from now. */
-export function retryAfterMs(header: string | null): number | undefined {
-  if (!header?.trim()) return undefined;
-  const seconds = Number(header);
-  const delayMs = Number.isNaN(seconds)
-    ? Date.parse(header) - Date.now()
-    : seconds * 1000;
-  return delayMs > 0 ? delayMs : undefined;
 }

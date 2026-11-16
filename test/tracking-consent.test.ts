@@ -211,3 +211,40 @@ it('cancels a batch already on its way when consent is withdrawn', async () => {
   expect(signal!.aborted).toBe(true);
   kirora.destroy();
 });
+
+it('stops trusting a saved grant once storage stops taking writes', async () => {
+  let full = false;
+  stubLocalStorage(() => full);
+  const key = 'kirora:tracking-consent:kirora_pk_test@api.kirora.io';
+  localStorage.setItem(key, 'granted');
+  const sent = recordEvents();
+  const kirora = new Kirora({
+    clientKey: 'kirora_pk_test',
+    requireTrackingConsent: true,
+    trackSessions: false,
+    logLevel: 'none',
+  });
+  await kirora.identify(tokenFor('ada'));
+  kirora.track('Pricing Viewed');
+  await kirora.flush();
+  expect(sent.map((event) => event.name)).toEqual(['Pricing Viewed']);
+
+  // The quota fills: the next write fails, and the events in it are kept in memory.
+  full = true;
+  kirora.track('Plan Compared');
+  await kirora.flush();
+  // From then on, the saved grant no longer counts, here or on later pages.
+  kirora.track('Invoice Paid');
+  await kirora.flush();
+  expect(localStorage.getItem(key)).toBeNull();
+
+  kirora.setTrackingConsent(true);
+  kirora.track('Plan Upgraded');
+  await kirora.flush();
+  expect(sent.map((event) => event.name)).toEqual([
+    'Pricing Viewed',
+    'Plan Compared',
+    'Plan Upgraded',
+  ]);
+  kirora.destroy();
+});

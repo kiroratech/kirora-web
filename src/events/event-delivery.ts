@@ -255,33 +255,37 @@ export class EventDelivery {
   }
 
   /**
-   * The events Kirora answered for once each, accepted or refused for good (logged by
+   * The events Kirora answered for once each, recorded or refused for good (logged by
    * code, never with the event). Kept for a retry: a refusal a later attempt may not
-   * get, an event with no answer, or one answered more than once, which could mean
-   * either.
+   * get, an event with no answer, one answered more than once, which could mean either,
+   * and one whose answer is neither a receipt nor a refusal.
    */
   private acknowledgedKeys(sent: unknown, batchKeys: ReadonlySet<string>): Set<string> {
     const results = (sent as { results?: unknown } | undefined)?.results;
     if (!Array.isArray(results)) return new Set();
-    const answers = new Map<string, { code?: unknown } | null>();
+    /** Each key's refusal code, or null once recorded; unreadable answers are left out. */
+    const answers = new Map<string, string | null>();
     const repeated = new Set<string>();
-    for (const result of results as {
-      idempotencyKey?: unknown;
-      error?: { code?: unknown };
-    }[]) {
+    for (const result of results as BatchResult[]) {
       const key = result?.idempotencyKey;
       if (typeof key !== 'string' || !batchKeys.has(key)) continue;
-      if (answers.has(key)) repeated.add(key);
-      answers.set(key, result.error ?? null);
+      if (answers.has(key) || repeated.has(key)) {
+        repeated.add(key);
+        continue;
+      }
+      const code = refusalCode(result);
+      if (code !== undefined) answers.set(key, code);
+      else if (isReceipt(result)) answers.set(key, null);
+      // Unreadable: neither. Counted as answered, so a second answer is a repeat.
+      else repeated.add(key);
     }
     const settled = new Set<string>();
     const refusals = new Map<string, number>();
-    for (const [key, error] of answers) {
+    for (const [key, code] of answers) {
       if (repeated.has(key)) continue;
-      const code = typeof error?.code === 'string' ? error.code : 'UNKNOWN';
-      if (error && RETRYABLE_EVENT_CODES.includes(code)) continue;
+      if (code !== null && RETRYABLE_EVENT_CODES.includes(code)) continue;
       settled.add(key);
-      if (error) refusals.set(code, (refusals.get(code) ?? 0) + 1);
+      if (code !== null) refusals.set(code, (refusals.get(code) ?? 0) + 1);
     }
     for (const [code, count] of refusals) {
       this.log('error', `${count} events refused by Kirora: ${code}`);
@@ -337,6 +341,30 @@ function fitBatch(
     bytes += size;
   }
   return { batch: events, bytes };
+}
+
+/** One event's answer in `POST /events/batch`, as far as it can be trusted. */
+type BatchResult = {
+  idempotencyKey?: unknown;
+  event?: unknown;
+  replayed?: unknown;
+  error?: unknown;
+};
+
+/** The refusal's code, if the result is a well-formed refusal. */
+function refusalCode(result: BatchResult): string | undefined {
+  const code = (result.error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && code !== '' ? code : undefined;
+}
+
+/** True if the result is Kirora's receipt for a recorded event. */
+function isReceipt(result: BatchResult): boolean {
+  return (
+    result.error === undefined &&
+    typeof result.replayed === 'boolean' &&
+    typeof result.event === 'object' &&
+    result.event !== null
+  );
 }
 
 /** An event's size in a batch: its JSON and the comma after it. */
