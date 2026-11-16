@@ -71,7 +71,8 @@ export class Kirora {
     const storage = deviceStorage((error) =>
       this.log(
         'error',
-        "Can't save to localStorage; events will be lost on reload",
+        "Can't save to localStorage: events will be lost on reload, and a saved tracking " +
+          'consent no longer counts until setTrackingConsent(true) is called again',
         error,
       ),
     );
@@ -172,15 +173,19 @@ export class Kirora {
   async logout(): Promise<void> {
     if (this.destroyed) return;
     const deadline = Date.now() + LOGOUT_DEADLINE_MS;
+    // Who this logout is for is decided by what came before it, never by an identify()
+    // called after it.
     const signInsBefore = this.identity.generation;
+    const signedInBefore = this.identity.user;
     // Otherwise its push registration could land after the detachment. A sign-in still
     // waiting for its token at the deadline is abandoned, as this logout came after it,
     // unless a newer sign-in has started since.
     const settled = await settledBy(this.identity.settled(), deadline);
-    if (!settled && this.identity.generation === signInsBefore) {
-      this.identity.abandonSignIn();
-    }
-    const { user } = this.identity;
+    const signedInSince = this.identity.generation !== signInsBefore;
+    if (!settled && !signedInSince) this.identity.abandonSignIn();
+    // The user a sign-in under way when logout() was called set, or failing that whoever
+    // was signed in then. A sign-in started since is newer, so it stays.
+    const user = signedInSince ? signedInBefore : this.identity.user;
     if (!user) return;
     try {
       if (!(await settledBy(this.delivery.flush(), deadline))) {

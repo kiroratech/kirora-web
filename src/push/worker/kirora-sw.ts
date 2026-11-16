@@ -3,6 +3,7 @@
 // leaves everything else to your own handlers.
 
 import { base64UrlBytes } from '../../utils/base64url.js';
+import { retryAfterMs } from '../../utils/retry-after.js';
 import { savedSubscription, type SavedSubscription } from '../subscription-store.js';
 
 declare const self: ServiceWorkerGlobalScope;
@@ -172,9 +173,10 @@ async function moveSubscription(event: PushSubscriptionChangeEvent): Promise<voi
     }
     const retry = status === 0 || status === 429 || status >= 500;
     if (!retry || attempt === MOVE_ATTEMPTS) return;
-    // Retry-After in seconds, or backoff; a date isn't worth parsing here.
+    // Never sooner than Retry-After (seconds or a date), nor than the backoff. A longer
+    // wait than the worker can be kept for ends it, rather than retrying early.
     const wait = Math.max(
-      Number(response?.headers.get('retry-after')) * 1000 || 0,
+      retryAfterMs(response?.headers.get('retry-after') ?? null) ?? 0,
       1000 * 2 ** attempt,
     );
     if (wait > MAX_RETRY_WAIT_MS) return;

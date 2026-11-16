@@ -216,8 +216,47 @@ it('gives up after three attempts, or on a wait too long to keep the worker for'
     ];
     await change({ newSubscription: subscription('https://push.example.com/new') });
     expect(sent).toHaveLength(1);
+
+    // The same as a date: two minutes away ends it too, rather than retrying early.
+    sent = [];
+    const inTwoMinutes = new Date(Date.now() + 120_000).toUTCString();
+    answers = [
+      () =>
+        Promise.resolve(
+          new Response(null, { status: 429, headers: { 'retry-after': inTwoMinutes } }),
+        ),
+    ];
+    await change({ newSubscription: subscription('https://push.example.com/new') });
+    expect(sent).toHaveLength(1);
     // Kept, as Kirora still has the old one.
     expect((await savedSubscription(SCOPE))?.subscription).toEqual(saved.subscription);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('waits out a Retry-After date under a minute before trying again', async () => {
+  vi.useFakeTimers();
+  try {
+    let first = true;
+    answers = [
+      () => {
+        if (!first) return Promise.resolve(new Response(null, { status: 204 }));
+        first = false;
+        const inThirty = new Date(Date.now() + 30_000).toUTCString();
+        return Promise.resolve(
+          new Response(null, { status: 429, headers: { 'retry-after': inThirty } }),
+        );
+      },
+    ];
+    const done = change({
+      newSubscription: subscription('https://push.example.com/new'),
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sent).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(25_000);
+    await done;
+    expect(sent).toHaveLength(2);
   } finally {
     vi.useRealTimers();
   }

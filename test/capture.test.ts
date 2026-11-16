@@ -206,7 +206,7 @@ it('refuses tracking from inside beforeSend rather than recursing', async () => 
   expect(sent.map((event) => event.name)).toEqual(['Plan Upgraded']);
 });
 
-it('retries events refused for a passing reason, or answered twice, and drops the rest', async () => {
+it('retries events refused for a passing reason or answered twice or unreadably', async () => {
   const answers: Record<string, string>[] = [];
   let attempt = 0;
   vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
@@ -224,24 +224,44 @@ it('retries events refused for a passing reason, or answered twice, and drops th
       Response.json({
         data: {
           results: [
-            { idempotencyKey: key('Accepted') },
+            { idempotencyKey: key('Accepted'), replayed: false, event: {} },
             { idempotencyKey: key('Limited'), error: { code: 'RATE_LIMITED' } },
             { idempotencyKey: key('Failed'), error: { code: 'INTERNAL_ERROR' } },
             { idempotencyKey: key('Over'), error: { code: 'PLAN_LIMIT_REACHED' } },
-            { idempotencyKey: key('Twice') },
+            { idempotencyKey: key('Twice'), replayed: false, event: {} },
             { idempotencyKey: key('Twice'), error: { code: 'VALIDATION_ERROR' } },
+            { idempotencyKey: key('Bare') },
+            { idempotencyKey: key('Null'), replayed: false, event: null },
+            { idempotencyKey: key('Empty'), error: {} },
           ],
         },
       }),
     );
   });
   const kirora = client();
-  for (const name of ['Accepted', 'Limited', 'Failed', 'Over', 'Twice'])
-    kirora.track(name);
+  const names = [
+    'Accepted',
+    'Limited',
+    'Failed',
+    'Over',
+    'Twice',
+    'Bare',
+    'Null',
+    'Empty',
+  ];
+  for (const name of names) kirora.track(name);
   await kirora.identify(tokenFor('ada'));
   await kirora.flush();
   await kirora.flush();
-  expect(Object.keys(answers[1]!)).toEqual(['Limited', 'Failed', 'Twice']);
+  // Kept: refused for a passing reason, answered twice, or answered unreadably.
+  expect(Object.keys(answers[1]!)).toEqual([
+    'Limited',
+    'Failed',
+    'Twice',
+    'Bare',
+    'Null',
+    'Empty',
+  ]);
 });
 
 it('keeps an event too large for keepalive while hidden, sending those behind it', async () => {
@@ -290,4 +310,25 @@ it('stops resending with a refused token that cannot be refreshed', async () => 
   expect(sends).toBe(1);
   kirora.destroy();
   vi.useRealTimers();
+});
+
+it('keeps keys named __proto__, constructor and prototype as data', async () => {
+  const sent = recordEvents();
+  let seen = '';
+  const kirora = client({
+    beforeSend: (event) => {
+      seen = JSON.stringify(event.properties);
+      return event;
+    },
+  });
+  const properties = JSON.parse(
+    '{"__proto__":{"label":"kept"},"constructor":"c","nested":{"prototype":"p"}}',
+  ) as Record<string, unknown>;
+  kirora.track('Odd Keys', properties);
+  await kirora.identify(tokenFor('ada'));
+  await kirora.flush();
+  const expected =
+    '{"__proto__":{"label":"kept"},"constructor":"c","nested":{"prototype":"p"}}';
+  expect(seen).toBe(expected);
+  expect(JSON.stringify(sent[0]!.properties)).toBe(expected);
 });

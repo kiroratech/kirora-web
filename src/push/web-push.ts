@@ -355,6 +355,8 @@ export class WebPush {
           cleanup.retryDelayMs,
           (error instanceof KiroraApiError && error.retryAfterMs) || 0,
         );
+      // Destroyed, or done by a registration, while this attempt was on its way.
+      if (this.destroyed || !this.cleanups.has(cleanup)) return;
       if (!retryable || retryAt > cleanup.giveUpAt) {
         this.cleanups.delete(cleanup);
         this.log('error', "Couldn't detach this browser from the signed-out user", error);

@@ -9,12 +9,14 @@ type Answer = 'granted' | 'refused';
  * says yes; without it, until they say no. The answer is remembered on the device, per
  * workspace.
  *
- * If storage can't be read, a refusal may be stored there unseen, so tracking waits for
- * an answer given to this client, which holds until the page closes.
+ * If storage can't be read, a refusal may be stored there unseen, so only an answer
+ * given to this client counts, holding until the page closes, and until then nothing is
+ * tracked. If it can be read but no longer written, a stored refusal still counts, but a
+ * stored grant is out of date and dropped: tracking needs a fresh one.
  */
 export class TrackingConsent {
   private readonly key: string;
-  /** The answer given to this client, for when storage can't be read. */
+  /** The answer given to this client, for when storage can't be trusted. */
   private given: Answer | null = null;
 
   constructor(
@@ -59,6 +61,12 @@ export class TrackingConsent {
     const stored = this.storage.getItem(this.key);
     // Reading may have just failed.
     if (!this.storage.readable) return this.given;
+    if (!this.storage.persistent && this.given === null && stored === 'granted') {
+      // Saved before writes started failing, so it may be out of date: removed if it can
+      // be, so a later page doesn't trust it either.
+      this.storage.removeItem(this.key);
+      return null;
+    }
     return stored === 'granted' || stored === 'refused' ? stored : null;
   }
 }

@@ -226,7 +226,7 @@ it('backs off from a token route whose tokens Kirora keeps refusing', async () =
 });
 
 it('understands Retry-After as an HTTP date', async () => {
-  const { retryAfterMs } = await import('../src/api/client-api.js');
+  const { retryAfterMs } = await import('../src/utils/retry-after.js');
   const inTwoMinutes = new Date(Date.now() + 120_000).toUTCString();
   expect(retryAfterMs(inTwoMinutes)).toBeGreaterThan(115_000);
   expect(retryAfterMs('120')).toBe(120_000);

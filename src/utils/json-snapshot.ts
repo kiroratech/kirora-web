@@ -39,7 +39,15 @@ export function jsonSnapshot(value: unknown): unknown {
       }
       const copied: Record<string, unknown> = {};
       for (const [key, member] of Object.entries(item)) {
-        if (member !== undefined) copied[key] = copy(member);
+        if (member === undefined) continue;
+        // Defined, not assigned: assigning a key named `__proto__` would set the copy's
+        // prototype instead of keeping it as data.
+        Object.defineProperty(copied, key, {
+          value: copy(member),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
       }
       return copied;
     } finally {

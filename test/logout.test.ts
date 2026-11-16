@@ -329,3 +329,32 @@ it('forgets the subscription kept for the worker once push is turned off', async
   expect(databases.get('subscriptions')?.size).toBe(0);
   kirora.destroy();
 });
+
+it('schedules nothing more when destroyed while a retry is on its way', async () => {
+  stubWebPush();
+  stubIndexedDB();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  let failRetry: (() => void) | undefined;
+  let attempts = 0;
+  const calls = kiroraWith((call) => {
+    if (call.method !== 'DELETE') return undefined;
+    attempts++;
+    if (attempts === 1) return unavailable();
+    // The retry hangs until the test lets it fail.
+    return new Promise<Response>((resolve) => {
+      failRetry = () => resolve(new Response(null, { status: 503 }));
+    });
+  });
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('ada'));
+  await kirora.logout();
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(deletes(calls)).toHaveLength(2);
+
+  kirora.destroy();
+  failRetry!();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(60 * 60_000);
+  expect(deletes(calls)).toHaveLength(2);
+});

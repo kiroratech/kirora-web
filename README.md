@@ -517,7 +517,10 @@ name or whose properties aren't an object, which isn't tracked.
   adopted by whoever signs in next, once, even with several tabs open. Each workspace's
   queue, session, device id and consent answer are kept separately.
 - **If storage fails.** If `localStorage` is blocked or full, the SDK keeps events in memory
-  instead and logs that once. They're still sent, but lost if the page reloads first.
+  instead and logs that once. They're still sent, but lost if the page reloads first. Once
+  writes fail, a tracking grant saved earlier no longer counts (it may be out of date), so
+  with `requireTrackingConsent` nothing more is tracked until `setTrackingConsent(true)`
+  is called again; a saved refusal still holds.
 - **Event context.** Each event includes a `context` alongside your properties: the page
   (`url`, `path`, `search`, `title`, `referrer`, using the canonical URL if the page has
   one, as Segment does), `utm_*` campaign tags, `locale`, `timezone`, `sessionId` and
@@ -550,25 +553,29 @@ origin can read them. Tracking consent gates event, session and tracking device-
 storage; its decision is stored independently, as are push registrations when enabled.
 Initialization also briefly writes and removes `kirora:probe` to test storage availability.
 
-| Where                                          | Name                                                                         | Holds                                                                                         | Removed                                                                                                                     |
-| ---------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `localStorage`                                 | `kirora:events:<client key>@<api host>`                                      | Events waiting to be sent, with their properties and context                                  | Once Kirora answers for them; the user's at `logout()`; all on consent withdrawal. Oldest dropped past 1,000 events or 1 MB |
-| Cookie on your root domain, and `localStorage` | `kirora_session_…`, `kirora:session:<client key>@<api host>`                 | The session id, whose it is, and when it was last active                                      | On consent withdrawal and at `logout()`. A session ends after 30 minutes without activity                                   |
-| Cookie on your root domain, and `localStorage` | `kirora_installation_id_…`, `kirora:installation-id:<client key>@<api host>` | `device.id`: a random id for this browser                                                     | On consent withdrawal, unless the browser is registered for push: then at `logout()`                                        |
-| `localStorage`                                 | `kirora:tracking-consent:<client key>@<api host>`                            | The visitor's tracking consent answer                                                         | Never; it's their answer                                                                                                    |
-| `localStorage`                                 | `kirora:push-registration:<client key>@<api host>`                           | Who this browser was registered for, its push endpoint, and when                              | At `logout()` and `setPushEnabled(false)`                                                                                   |
-| `localStorage`                                 | `kirora:push-disabled:<client key>@<api host>`                               | That `setPushEnabled(false)` holds on this browser                                            | At `setPushEnabled(true)`, or when the prompt is answered `granted`                                                         |
-| IndexedDB                                      | `kirora-push` database                                                       | The push subscription last registered, the client key and API address, for the service worker | When Kirora refuses a replaced subscription; replaced by the next registration                                              |
-| The browser's push service                     | (the push subscription)                                                      | Where to deliver pushes                                                                       | At `setPushEnabled(false)`, or if `logout()` can't reach Kirora; otherwise kept for the next user                           |
-| Memory only                                    |                                                                              | The user token                                                                                | When the page closes, or at `logout()`; a signed-out user's is kept until their browser is detached (at most a day)         |
+| Where                                          | Name                                                                         | Holds                                                                                         | Removed                                                                                                                                                      |
+| ---------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `localStorage`                                 | `kirora:events:<client key>@<api host>`                                      | Events waiting to be sent, with their properties and context                                  | Once Kirora answers for them; the user's at `logout()`; all on consent withdrawal. Oldest dropped past 1,000 events or 1 MB                                  |
+| Cookie on your root domain, and `localStorage` | `kirora_session_…`, `kirora:session:<client key>@<api host>`                 | The session id, whose it is, and when it was last active                                      | On consent withdrawal and at `logout()`. A session ends after 30 minutes without activity                                                                    |
+| Cookie on your root domain, and `localStorage` | `kirora_installation_id_…`, `kirora:installation-id:<client key>@<api host>` | `device.id`: a random id for this browser                                                     | On consent withdrawal, unless the browser is registered for push: then at `logout()`                                                                         |
+| `localStorage`                                 | `kirora:tracking-consent:<client key>@<api host>`                            | The visitor's tracking consent answer                                                         | Never; it's their answer                                                                                                                                     |
+| `localStorage`                                 | `kirora:push-registration:<client key>@<api host>`                           | Who this browser was registered for, its push endpoint, and when                              | At `logout()` and `setPushEnabled(false)`                                                                                                                    |
+| `localStorage`                                 | `kirora:push-disabled:<client key>@<api host>`                               | That `setPushEnabled(false)` holds on this browser                                            | At `setPushEnabled(true)`, or when the prompt is answered `granted`                                                                                          |
+| IndexedDB                                      | `kirora-push` database                                                       | The push subscription last registered, the client key and API address, for the service worker | When Kirora refuses a replaced subscription, at `setPushEnabled(false)`, or when a failed detach cancels the subscription; replaced by the next registration |
+| IndexedDB                                      | `kirora-locks` database                                                      | Nothing: an empty store, used as a lock between tabs in browsers without Web Locks            | Never; it holds no data                                                                                                                                      |
+| The browser's push service                     | (the push subscription)                                                      | Where to deliver pushes                                                                       | At `setPushEnabled(false)`, or if `logout()` can't reach Kirora; otherwise kept for the next user                                                            |
+| Memory only                                    |                                                                              | The user token                                                                                | When the page closes, or at `logout()`; a signed-out user's is kept until their browser is detached (at most a day)                                          |
 
 The cookies are `SameSite=Lax`, `Secure` on HTTPS, and last a year; their value is the
 same as the `localStorage` copy, which restores a cleared cookie. If `localStorage` is
 unavailable or full, the SDK keeps these in memory for the page's life instead.
 
-Several tabs share the queue. Browsers older than Firefox 96 and Safari 15.4 have no
-Web Locks, so two tabs saving at the same instant can lose an event, and two tabs signing
-in at the same instant can both adopt the same event from before sign-in.
+Several tabs share the queue, and change it one at a time under a Web Lock. Browsers
+older than Firefox 96 and Safari 15.4 have no Web Locks, so there the SDK uses an
+IndexedDB transaction as the lock instead, in a `kirora-locks` database that holds
+nothing. Only where IndexedDB is refused too (some private windows) can two tabs saving
+at the same instant lose an event, or two tabs signing in at the same instant both adopt
+the same event from before sign-in.
 
 ## Content Security Policy
 
