@@ -7,9 +7,9 @@ export class NotJsonError extends Error {}
  * or lose (a function, `NaN`, a `Map`, a circular reference…) rather than send something
  * other than what the app tracked.
  *
- * Two JavaScript conventions are kept, as `JSON.stringify()` keeps them: an object member
- * that is `undefined` is left out, as if it were missing, and an object with `toJSON()`,
- * such as a `Date`, is copied as what that answers.
+ * JavaScript's conventions are kept, as `JSON.stringify()` keeps them: an object member
+ * that is `undefined` is left out, as if it were missing; an object with `toJSON()`, such
+ * as a `Date`, is copied as what that answers; and a class instance is its own fields.
  */
 export function jsonSnapshot(value: unknown): unknown {
   /** The objects being copied above the current one: meeting one again is a cycle. */
@@ -30,13 +30,12 @@ export function jsonSnapshot(value: unknown): unknown {
     ancestors.add(item);
     try {
       if (Array.isArray(item)) return Array.from(item, copy);
-      const prototype = Object.getPrototypeOf(item) as unknown;
-      if (prototype !== Object.prototype && prototype !== null) {
-        const { toJSON } = item as { toJSON?: unknown };
-        if (typeof toJSON !== 'function') {
-          throw new NotJsonError('an object JSON has no form for, such as a Map');
-        }
-        return copy((toJSON as () => unknown).call(item));
+      const { toJSON } = item as { toJSON?: unknown };
+      if (typeof toJSON === 'function') return copy((toJSON as () => unknown).call(item));
+      // A class instance, or a plain object from another frame, is its own fields. A
+      // built-in such as a Map, Set, RegExp or typed array would be lost or garbled.
+      if (Object.prototype.toString.call(item) !== '[object Object]') {
+        throw new NotJsonError('an object JSON has no form for, such as a Map');
       }
       const copied: Record<string, unknown> = {};
       for (const [key, member] of Object.entries(item)) {

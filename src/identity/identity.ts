@@ -91,6 +91,11 @@ export class Identity {
     this.setUser(null);
   }
 
+  /** True if a refused token can be replaced, through `fetchUserToken`. */
+  get canRefresh(): boolean {
+    return this.fetchUserToken !== undefined;
+  }
+
   /** Lets a sign-in still waiting for its token set no one, keeping whoever is signed in. */
   abandonSignIn(): void {
     this.calls++;

@@ -40,8 +40,6 @@ type DeviceAnswer = { lastSeenAt?: string } | undefined;
  */
 type Cleanup = {
   user: SignedInUser;
-  /** True at logout: the user is leaving, so their token is never refreshed. */
-  signingOut: boolean;
   installationId: string;
   /** The push app the browser was last registered with, if known. */
   pushAppId: string | undefined;
@@ -170,7 +168,7 @@ export class WebPush {
     }
     this.storage.setItem(this.disabledKey, '1');
     const { user } = this.identity;
-    if (user) await this.detach(user, undefined, false);
+    if (user) await this.detach(user);
     await this.oneAtATime(() => this.cancelSubscription());
   }
 
@@ -296,12 +294,13 @@ export class WebPush {
    * refused for good, or a day has passed. Signing someone else in doesn't stop it: only
    * their successful registration of this browser, which takes it over, does.
    */
-  detach(user: SignedInUser, deadline?: number, signingOut = true): Promise<void> {
+  detach(user: SignedInUser, deadline?: number): Promise<void> {
     const last = this.lastRegistration();
-    if (!last) return Promise.resolve();
+    // Registered for someone else (another tab's sign-in took it over): not this user's
+    // to detach, nor their subscription to cancel.
+    if (!last || last.userSubject !== user.subject) return Promise.resolve();
     const cleanup: Cleanup = {
       user,
-      signingOut,
       installationId: this.installationId(),
       pushAppId: last.pushAppId,
       retryDelayMs: FIRST_CLEANUP_RETRY_MS,
@@ -336,17 +335,19 @@ export class WebPush {
     try {
       await this.api.request('DELETE', `/devices/${cleanup.installationId}`, {
         as: cleanup.user,
-        // A user signing out has their token never refreshed, least of all through the
-        // next user's fetchUserToken. One still signed in (turning push off) does; once
-        // they've signed out, a refresh finds them gone and gives up.
-        refresh: !cleanup.signingOut,
+        // While the user is still signed in (the first attempt at logout, or turning push
+        // off), an expired token is refreshed as for any call. Once they've signed out, a
+        // refresh finds them gone and gives up, so it's never through the next user's.
+        refresh: true,
         timeoutMs: remaining !== undefined && remaining > 0 ? remaining : undefined,
       });
       this.cleanups.delete(cleanup);
       this.log('debug', 'Detached this browser');
       return;
     } catch (error) {
-      if (first) await this.cancelSubscription();
+      // A 404 means there was nothing of this user's here to detach.
+      const nothingToDetach = error instanceof KiroraApiError && error.status === 404;
+      if (first && !nothingToDetach) await this.cancelSubscription();
       const retryable = !(error instanceof KiroraApiError) || error.retryable;
       const retryAt =
         Date.now() +
@@ -389,20 +390,20 @@ export class WebPush {
 
   /** Cancels the browser's push subscription, logging a failure. Never rejects. */
   private async cancelSubscription(): Promise<void> {
+    // Forgotten first, or the worker could subscribe the browser again when the browser
+    // reports the subscription gone.
+    try {
+      const worker = await navigator.serviceWorker.getRegistration(this.serviceWorkerUrl);
+      if (worker) await savedSubscription(worker.scope, null);
+    } catch (error) {
+      this.log('debug', "Couldn't forget the subscription kept for the worker", error);
+    }
     try {
       if (!(await unsubscribe(this.serviceWorkerUrl))) {
         this.log('error', "Couldn't cancel this browser's push subscription");
       }
     } catch (error) {
       this.log('error', "Couldn't cancel this browser's push subscription", error);
-    }
-    // Otherwise the worker could subscribe the browser again when the browser reports a
-    // subscription change.
-    try {
-      const worker = await navigator.serviceWorker.getRegistration(this.serviceWorkerUrl);
-      if (worker) await savedSubscription(worker.scope, null);
-    } catch (error) {
-      this.log('debug', "Couldn't forget the subscription kept for the worker", error);
     }
   }
 

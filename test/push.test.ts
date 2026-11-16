@@ -105,8 +105,8 @@ it('leaves nothing registered when logging out during a registration', async () 
 });
 
 it("keeps the next user registered when they sign in during a logout's sending", async () => {
-  // Alice's detachment still goes after Bob's registration: Kirora only detaches Alice's
-  // installations, so it can't undo Bob's.
+  // Bob's registration took the browser over first, so there's nothing of Alice's left
+  // to detach, and Bob's subscription is left alone.
   stubLocalStorage();
   stubWebPush();
   let holding = false;
@@ -123,7 +123,7 @@ it("keeps the next user registered when they sign in during a logout's sending",
   server.release();
   await loggedOut;
 
-  expect(deviceChanges(server.handled)).toEqual(['alice', 'bob', '-alice']);
+  expect(deviceChanges(server.handled)).toEqual(['alice', 'bob']);
   expect(savedRegistration()).toBe('bob');
   await kirora.setPushConsent(true);
   expect(server.requests.at(-1)).toMatchObject({ path: '/push-consent', user: 'bob' });
