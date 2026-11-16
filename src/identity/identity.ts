@@ -22,8 +22,6 @@ export type SignedInUser = {
   readonly subject: string;
   /** The token's `sub`, or null. A refreshed token must have the same. */
   readonly tokenSubject: string | null;
-  /** Set once Kirora has accepted a call with this user's token. */
-  confirmed?: true;
 };
 
 /**

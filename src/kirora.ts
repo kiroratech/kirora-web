@@ -2,7 +2,7 @@ import { ClientApi } from './api/client-api.js';
 import { KiroraApiError, KiroraError, UserTokenError } from './errors.js';
 import { EventDelivery } from './events/event-delivery.js';
 import { EventQueue } from './events/event-queue.js';
-import { Identity, isUnnamedSubject, type SignedInUser } from './identity/identity.js';
+import { Identity, isUnnamedSubject } from './identity/identity.js';
 import { WebPush } from './push/web-push.js';
 import { deviceStorage, type KeyValueStorage } from './storage/device-storage.js';
 import { STORAGE_KEYS } from './storage/keys.js';
@@ -45,11 +45,6 @@ export class Kirora {
   private readonly push: WebPush;
   /** Where `device.id` is kept, per workspace. */
   private readonly installationIdKey: string;
-  /**
-   * The events the latest sign-in adopted, until Kirora accepts its token. Refused before
-   * then, the sign-in failed, so it gives them back.
-   */
-  private adoption: { user: SignedInUser; keys: Set<string> } | undefined;
   private destroyed = false;
   /** Undoes what the constructor started: listeners and timers. */
   private readonly stopWatching: (() => void)[] = [];
@@ -65,7 +60,7 @@ export class Kirora {
       this.log('error', 'clientKey should be your client key, kirora_pk_…');
     }
     this.identity = new Identity(options.fetchUserToken);
-    this.api = new ClientApi(options, this.identity, (user) => this.onTokenRefused(user));
+    this.api = new ClientApi(options, this.identity);
     // Logged rather than thrown, so a bad setting can't break the page. Nothing is sent.
     if (this.api.urlProblem) this.log('error', this.api.urlProblem);
     const storage = deviceStorage((error) =>
@@ -299,16 +294,6 @@ export class Kirora {
     for (const stop of this.stopWatching.splice(0)) stop();
   }
 
-  /** A sign-in whose token Kirora never accepted gives back the events it adopted. */
-  private onTokenRefused(user: SignedInUser): void {
-    const { adoption } = this;
-    if (adoption?.user !== user || user.confirmed) return;
-    this.adoption = undefined;
-    this.queue
-      .release(user.subject, adoption.keys)
-      .catch((error: unknown) => this.log('error', "Couldn't release events", error));
-  }
-
   /** Forgets what tracking stored, as when the visitor refuses it. */
   private forgetTracking(): void {
     this.tracker.forget();
@@ -326,14 +311,11 @@ export class Kirora {
   private async onSignedIn(): Promise<void> {
     const { user } = this.identity;
     // What was tracked before sign-in is this user's from now on, whoever signs in next,
-    // unless Kirora refuses their token before accepting it once.
+    // unless Kirora refuses their token before accepting a batch.
     if (user) {
-      try {
-        const keys = await this.queue.adopt(user.subject);
-        this.adoption = keys.size > 0 && !user.confirmed ? { user, keys } : undefined;
-      } catch (error) {
-        this.log('error', "Couldn't adopt events", error);
-      }
+      await this.delivery
+        .adopt(user)
+        .catch((error: unknown) => this.log('error', "Couldn't adopt events", error));
     }
     // Events left by earlier sign-ins with tokens naming no one: they'd otherwise wait
     // for good, crowding out the events that can go. Only once they're old, as another

@@ -53,6 +53,11 @@ export class EventDelivery {
    * signed in now, and one still under way for a user who has since signed out.
    */
   private readonly sending = new Set<AbortController>();
+  /**
+   * The events the latest sign-in adopted, until Kirora accepts a batch as that user. A
+   * token refused before then means the sign-in failed, so they're given back.
+   */
+  private adoption: { user: SignedInUser; keys: Set<string> } | undefined;
 
   constructor(
     private readonly api: ClientApi,
@@ -75,6 +80,15 @@ export class EventDelivery {
   cancel(): void {
     this.stop();
     for (const sending of this.sending) sending.abort();
+  }
+
+  /**
+   * Makes the events from before sign-in `user`'s, as they sign in. Given back if Kirora
+   * refuses their token before accepting a batch.
+   */
+  async adopt(user: SignedInUser): Promise<void> {
+    const keys = await this.queue.adopt(user.subject);
+    this.adoption = keys.size > 0 ? { user, keys } : undefined;
   }
 
   /** After an event is queued: send at once if enough wait, otherwise soon. */
@@ -156,10 +170,10 @@ export class EventDelivery {
       maxEvents = EVENT_BATCH_SIZE;
       if (outcome.size < batch.length) {
         this.log('debug', `Retrying ${batch.length - outcome.size} events later`);
-        this.retryLater();
+        this.retryLater(user);
         return;
       }
-      this.resetBackoff();
+      if (this.identity.user === user) this.resetBackoff();
     }
   }
 
@@ -183,13 +197,15 @@ export class EventDelivery {
         as: user,
         signal: sending.signal,
       });
+      // Kirora took the token: what this sign-in adopted is its for good.
+      if (this.adoption?.user === user) this.adoption = undefined;
       const settled = this.acknowledgedKeys(sent, batchKeys);
       this.log('debug', `Sent ${settled.size} events`);
       return settled;
     } catch (error) {
       // Cancelled on purpose, as consent was withdrawn: not a failure to retry.
       if (sending.signal.aborted) return 'stop';
-      return this.classifyFailure(error, batchKeys);
+      return this.classifyFailure(user, error, batchKeys);
     } finally {
       this.sending.delete(sending);
     }
@@ -197,13 +213,14 @@ export class EventDelivery {
 
   /** What a failed batch means: try later, stop, split it, or drop it as refused. */
   private classifyFailure(
+    user: SignedInUser,
     error: unknown,
     batchKeys: Set<string>,
   ): Set<string> | 'split' | 'stop' {
     if (!(error instanceof KiroraApiError) || error.retryable) {
       // Offline, timed out, 429/5xx, or the token fetch failed: keep them, retry later.
       if (error instanceof UserTokenError) this.log('error', error.message, error.cause);
-      this.retryLater(error);
+      this.retryLater(user, error);
       return 'stop';
     }
     // Still refused after a token refresh, or the user changed: keep the events for the
@@ -211,9 +228,10 @@ export class EventDelivery {
     // keeps handing out refused tokens would otherwise be asked again at every send.
     if (error.status === 401) {
       this.log('error', 'Events not sent', error);
+      this.giveBackAdopted(user);
       // Worth trying again only if a fresh token can be asked for; a token passed to
       // identify() would be refused every time.
-      if (this.identity.canRefresh) this.retryLater();
+      if (this.identity.canRefresh) this.retryLater(user);
       return 'stop';
     }
     // Too large or invalid: retry in halves until we isolate the bad event, so the rest of
@@ -225,6 +243,16 @@ export class EventDelivery {
       code: error.code,
     });
     return batchKeys;
+  }
+
+  /** A sign-in whose token Kirora never accepted gives back the events it adopted. */
+  private giveBackAdopted(user: SignedInUser): void {
+    const { adoption } = this;
+    if (adoption?.user !== user) return;
+    this.adoption = undefined;
+    this.queue
+      .release(user.subject, adoption.keys)
+      .catch((error: unknown) => this.log('error', "Couldn't release events", error));
   }
 
   /** Whether a failure's delay still applies. Only our own backoff can be skipped. */
@@ -267,8 +295,13 @@ export class EventDelivery {
     return settled;
   }
 
-  /** Backs off, doubling up to 5 minutes, and never sooner than `Retry-After`. */
-  private retryLater(error?: unknown): void {
+  /**
+   * Backs off, doubling up to 5 minutes, and never sooner than `Retry-After`, if `user` is
+   * still signed in. A send still finishing for one who has signed out (e.g. after their
+   * logout gave up waiting) leaves the next user's timing alone.
+   */
+  private retryLater(user: SignedInUser, error?: unknown): void {
+    if (this.identity.user !== user) return;
     const retryAfterMs = (error instanceof KiroraApiError && error.retryAfterMs) || 0;
     // Jitter only ever adds to the server's delay, so throttled clients spread out.
     const delayMs = Math.max(
