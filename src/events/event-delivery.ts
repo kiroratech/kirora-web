@@ -173,7 +173,7 @@ export class EventDelivery {
         this.retryLater(user);
         return;
       }
-      if (this.identity.user === user) this.resetBackoff();
+      this.resetBackoff(user);
     }
   }
 
@@ -223,14 +223,13 @@ export class EventDelivery {
       this.retryLater(user, error);
       return 'stop';
     }
-    // Still refused after a token refresh, or the user changed: keep the events for the
-    // next identify() as their own user. Backing off meanwhile, as a token route that
-    // keeps handing out refused tokens would otherwise be asked again at every send.
+    // Still refused after a token refresh, or the user changed: the events wait for the
+    // next identify() as their own user, and those this sign-in adopted are given back.
+    // Retried with backoff only if a fresh token can be asked for: a token passed to
+    // identify() would be refused every time.
     if (error.status === 401) {
       this.log('error', 'Events not sent', error);
       this.giveBackAdopted(user);
-      // Worth trying again only if a fresh token can be asked for; a token passed to
-      // identify() would be refused every time.
       if (this.identity.canRefresh) this.retryLater(user);
       return 'stop';
     }
@@ -314,7 +313,9 @@ export class EventDelivery {
     this.schedule(this.notBefore);
   }
 
-  private resetBackoff(): void {
+  /** Clears the backoff after a success, if `user` is still signed in (as `retryLater`). */
+  private resetBackoff(user: SignedInUser): void {
+    if (this.identity.user !== user) return;
     this.retryDelayMs = FLUSH_INTERVAL_MS;
     this.notBefore = 0;
     this.delayFromServer = false;
