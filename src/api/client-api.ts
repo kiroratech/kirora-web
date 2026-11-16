@@ -15,6 +15,12 @@ type RequestOptions = {
   keepalive?: boolean;
   /** The user to send as, if not whoever is signed in now. */
   as?: SignedInUser;
+  /** Cancels the call, which then fails as a network error would. */
+  signal?: AbortSignal;
+  /** Gives up sooner than the usual 30 seconds, e.g. within logout()'s deadline. */
+  timeoutMs?: number;
+  /** False to take a 401 as final, without asking `fetchUserToken` for a fresh token. */
+  refresh?: boolean;
 };
 
 /** A request still unanswered after this is abandoned and treated as a network failure. */
@@ -36,6 +42,8 @@ export class ClientApi {
   constructor(
     options: ClientApiOptions,
     private readonly identity: Identity,
+    /** Told when Kirora refuses `user`'s token for good, even after a refresh. */
+    private readonly onRefused: (user: SignedInUser) => void = () => undefined,
   ) {
     const apiUrl = options.apiUrl ?? DEFAULT_API_URL;
     const url = urlOf(apiUrl);
@@ -65,33 +73,46 @@ export class ClientApi {
     const user = options.as ?? this.identity.user;
     if (!user) throw new KiroraError('call identify() with a user token first');
     const sentToken = user.token;
-    const answer = await this.send(this.baseUrl, method, path, sentToken, options);
+    const answer = await this.send(this.baseUrl, method, path, user, sentToken, options);
     if (answer !== REFUSED) return answer as Data | undefined;
 
     // Kirora refused the token: get a fresh one, once, and try again with it.
-    const freshToken = await this.identity.refresh(user, sentToken);
+    const freshToken =
+      options.refresh === false ? null : await this.identity.refresh(user, sentToken);
     if (freshToken) {
-      const retried = await this.send(this.baseUrl, method, path, freshToken, options);
+      const retried = await this.send(
+        this.baseUrl,
+        method,
+        path,
+        user,
+        freshToken,
+        options,
+      );
       if (retried !== REFUSED) return retried as Data | undefined;
     }
+    this.onRefused(user);
     throw new KiroraApiError(401, undefined, 'Kirora answered 401');
   }
 
   /**
    * One call, answer and all: the timeout covers reading the body too, since a body that
    * stops arriving would otherwise hold the call open for good. Returns `REFUSED` for a
-   * 401, so the caller can refresh the token.
+   * 401, so the caller can refresh the token. Any other answer confirms `user`.
    */
   private async send(
     baseUrl: string,
     method: string,
     path: string,
+    user: SignedInUser,
     userToken: string,
     options: RequestOptions,
   ): Promise<unknown> {
     const hasBody = options.body !== undefined;
-    // AbortSignal.timeout() is newer than the browsers we support.
+    // AbortSignal.timeout() and AbortSignal.any() are newer than the browsers we support.
     const abort = new AbortController();
+    const cancel = () => abort.abort();
+    if (options.signal?.aborted) cancel();
+    options.signal?.addEventListener('abort', cancel);
     const exchange = async () => {
       const response = await fetch(`${baseUrl}${path}`, {
         method,
@@ -110,15 +131,18 @@ export class ClientApi {
         response.body?.cancel().catch(() => undefined);
         return REFUSED;
       }
+      // Kirora took the token, whatever else it says.
+      user.confirmed = true;
       if (!response.ok) throw await toApiError(response);
       if (response.status === 204) return undefined;
       return ((await response.json()) as { data: unknown }).data;
     };
     try {
-      return await withTimeout(exchange(), REQUEST_TIMEOUT_MS);
+      return await withTimeout(exchange(), options.timeoutMs ?? REQUEST_TIMEOUT_MS);
     } finally {
       // Lets go of the call if it timed out; does nothing once it's answered.
       abort.abort();
+      options.signal?.removeEventListener('abort', cancel);
     }
   }
 }

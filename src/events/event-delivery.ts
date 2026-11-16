@@ -4,6 +4,7 @@ import { KiroraApiError, UserTokenError } from '../errors.js';
 import type { TrackingConsent } from '../tracking/consent.js';
 import type { EventQueue, QueuedEvent } from './event-queue.js';
 import type { Log } from '../utils/log.js';
+import { utf8Length } from '../utils/utf8.js';
 
 /** The API accepts at most 100 events per batch. */
 const EVENT_BATCH_SIZE = 100;
@@ -19,6 +20,8 @@ const FLUSH_INTERVAL_MS = 30_000;
 const MAX_RETRY_DELAY_MS = 5 * 60_000;
 /** Answers that blame something in the batch: halving it finds the event to drop. */
 const SPLIT_STATUSES = [400, 413, 422];
+/** Per-event refusals that a later attempt may not get: the event is kept and retried. */
+const RETRYABLE_EVENT_CODES = ['RATE_LIMITED', 'INTERNAL_ERROR', 'SERVICE_UNAVAILABLE'];
 /** Retry delays vary by this fraction, so clients don't all retry at once. */
 const JITTER = 0.1;
 
@@ -43,6 +46,8 @@ export class EventDelivery {
    */
   private delayFromServer = false;
   private destroyed = false;
+  /** Cancels the batch being sent, e.g. as consent is withdrawn. */
+  private sending: AbortController | undefined;
 
   constructor(
     private readonly api: ClientApi,
@@ -56,6 +61,15 @@ export class EventDelivery {
   destroy(): void {
     this.destroyed = true;
     this.stop();
+  }
+
+  /**
+   * Cancels the scheduled send and the batch on its way, as tracking consent is
+   * withdrawn. What Kirora already accepted can't be recalled.
+   */
+  cancel(): void {
+    this.stop();
+    this.sending?.abort();
   }
 
   /** After an event is queued: send at once if enough wait, otherwise soon. */
@@ -125,12 +139,10 @@ export class EventDelivery {
       );
       // Consent may have been withdrawn, or the user changed, while the queue was read.
       if (batch.length === 0 || !mayStillSend()) return;
-      // A single event too large for keepalive goes without it rather than not at all.
-      const outcome = await this.sendBatch(
-        user,
-        batch,
-        hidden && bytes <= MAX_KEEPALIVE_BYTES,
-      );
+      // A single event too large for keepalive waits for the page to be shown again: a
+      // request without keepalive could be cut off as the tab closes.
+      if (hidden && bytes > MAX_KEEPALIVE_BYTES) return;
+      const outcome = await this.sendBatch(user, batch, hidden);
       if (outcome === 'split') {
         maxEvents = Math.ceil(batch.length / 2);
         continue;
@@ -140,7 +152,7 @@ export class EventDelivery {
       // Past the event a split isolated, the rest go in full batches again.
       maxEvents = EVENT_BATCH_SIZE;
       if (outcome.size < batch.length) {
-        this.log('error', "Kirora's answer didn't cover every event; retrying the rest");
+        this.log('debug', `Retrying ${batch.length - outcome.size} events later`);
         this.retryLater();
         return;
       }
@@ -158,18 +170,22 @@ export class EventDelivery {
     keepalive: boolean,
   ): Promise<Set<string> | 'split' | 'stop'> {
     const batchKeys = new Set(batch.map((event) => event.idempotencyKey));
+    const sending = (this.sending = new AbortController());
     try {
       const sent = await this.api.request<unknown>('POST', '/events/batch', {
         // Lets the server correct for clock skew.
         body: { sentAt: new Date().toISOString(), events: batch },
         keepalive,
         as: user,
+        signal: sending.signal,
       });
       const settled = this.acknowledgedKeys(sent, batchKeys);
       this.log('debug', `Sent ${settled.size} events`);
       return settled;
     } catch (error) {
       return this.classifyFailure(error, batchKeys);
+    } finally {
+      if (this.sending === sending) this.sending = undefined;
     }
   }
 
@@ -194,13 +210,10 @@ export class EventDelivery {
     // the batch still goes.
     if (SPLIT_STATUSES.includes(error.status) && batchKeys.size > 1) return 'split';
     // Any other 4xx will fail every time, so drop the batch instead of blocking the queue.
-    this.log(
-      'error',
-      error.code === 'PLAN_FEATURE_UNAVAILABLE'
-        ? "Events dropped: this workspace's plan doesn't record custom events"
-        : 'Events dropped: Kirora refused them',
-      error,
-    );
+    this.log('error', `${batchKeys.size} events dropped: Kirora refused them`, {
+      status: error.status,
+      code: error.code,
+    });
     return batchKeys;
   }
 
@@ -210,18 +223,36 @@ export class EventDelivery {
   }
 
   /**
-   * The events Kirora answered for, accepted or refused. Refusals are final (the event
-   * itself is invalid), so they're logged and settled too. Anything unanswered stays.
+   * The events Kirora answered for once each, accepted or refused for good (logged by
+   * code, never with the event). Kept for a retry: a refusal a later attempt may not
+   * get, an event with no answer, or one answered more than once, which could mean
+   * either.
    */
   private acknowledgedKeys(sent: unknown, batchKeys: ReadonlySet<string>): Set<string> {
     const results = (sent as { results?: unknown } | undefined)?.results;
-    const settled = new Set<string>();
-    if (!Array.isArray(results)) return settled;
-    for (const result of results as { idempotencyKey?: unknown; error?: unknown }[]) {
+    if (!Array.isArray(results)) return new Set();
+    const answers = new Map<string, { code?: unknown } | null>();
+    const repeated = new Set<string>();
+    for (const result of results as {
+      idempotencyKey?: unknown;
+      error?: { code?: unknown };
+    }[]) {
       const key = result?.idempotencyKey;
       if (typeof key !== 'string' || !batchKeys.has(key)) continue;
+      if (answers.has(key)) repeated.add(key);
+      answers.set(key, result.error ?? null);
+    }
+    const settled = new Set<string>();
+    const refusals = new Map<string, number>();
+    for (const [key, error] of answers) {
+      if (repeated.has(key)) continue;
+      const code = typeof error?.code === 'string' ? error.code : 'UNKNOWN';
+      if (error && RETRYABLE_EVENT_CODES.includes(code)) continue;
       settled.add(key);
-      if (result.error) this.log('error', 'Event refused', result);
+      if (error) refusals.set(code, (refusals.get(code) ?? 0) + 1);
+    }
+    for (const [code, count] of refusals) {
+      this.log('error', `${count} events refused by Kirora: ${code}`);
     }
     return settled;
   }
@@ -265,10 +296,9 @@ function fitBatch(
   events: QueuedEvent[],
   maxBytes: number,
 ): { batch: QueuedEvent[]; bytes: number } {
-  const encoder = new TextEncoder();
   let bytes = ENVELOPE_BYTES;
   for (const [index, event] of events.entries()) {
-    const eventBytes = encoder.encode(JSON.stringify(event)).length + 1;
+    const eventBytes = utf8Length(JSON.stringify(event)) + 1;
     if (bytes + eventBytes > maxBytes && index > 0) {
       return { batch: events.slice(0, index), bytes };
     }

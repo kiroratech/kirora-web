@@ -29,6 +29,22 @@ export type KiroraOptions = {
    * its own. Defaults to `https://api.kirora.io`.
    */
   apiUrl?: string;
+  /**
+   * Redacts or drops an event before it's stored or sent: called once per event,
+   * automatic ones included, with a copy of its name, properties and context. Return the
+   * event with fields changed or removed, or `null` to drop it. It must answer at once:
+   * an error, a promise or values JSON can't hold drop the event. The name, time and
+   * idempotency key stay the SDK's.
+   */
+  beforeSend?: (event: BeforeSendEvent) => BeforeSendEvent | null;
+};
+
+/** An event as `beforeSend` sees it: a copy, so changing it changes nothing else. */
+export type BeforeSendEvent = {
+  name: string;
+  properties: EventProperties;
+  /** The page, session, device, locale and campaign the SDK collected. */
+  context: Record<string, unknown>;
 };
 
 /** The VAPID key and other app settings come from Kirora. */
@@ -41,6 +57,13 @@ export type PushOptions = {
 
 /** The answer to `requestPushPermission()`. Same values on every Kirora SDK. */
 export type PushPermission = 'granted' | 'denied' | 'unanswered' | 'unsupported';
+
+/**
+ * The answer to `getPushStatus()`. Same values on every Kirora SDK. The browser's
+ * permission comes first; with it granted, `enabled` when this browser is registered for
+ * the signed-in user.
+ */
+export type PushStatus = 'enabled' | 'disabled' | 'denied' | 'unanswered' | 'unsupported';
 
 export type LogLevel = 'none' | 'error' | 'debug';
 

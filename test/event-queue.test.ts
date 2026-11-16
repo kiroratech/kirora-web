@@ -10,8 +10,10 @@ const event = (name: string): QueuedEvent => ({
   context: { device: { id: 'browser-1' } },
 });
 
-const names = async (queue: EventQueue) =>
-  (await queue.oldest(100, null)).map((queued) => queued.name);
+const names = async (queue: EventQueue) => {
+  await queue.adopt('ada');
+  return (await queue.oldest(100, 'ada')).map((queued) => queued.name);
+};
 
 it('saves the events added in one tick with one write', async () => {
   const storage = memoryStorage();

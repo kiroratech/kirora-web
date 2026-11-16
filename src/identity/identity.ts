@@ -22,6 +22,8 @@ export type SignedInUser = {
   readonly subject: string;
   /** The token's `sub`, or null. A refreshed token must have the same. */
   readonly tokenSubject: string | null;
+  /** Set once Kirora has accepted a call with this user's token. */
+  confirmed?: true;
 };
 
 /**
@@ -82,6 +84,11 @@ export class Identity {
   end(): void {
     this.calls++;
     this.setUser(null);
+  }
+
+  /** Lets a sign-in still waiting for its token set no one, keeping whoever is signed in. */
+  abandonSignIn(): void {
+    this.calls++;
   }
 
   /** Waits for the latest sign-in. Its own caller handles its errors. */

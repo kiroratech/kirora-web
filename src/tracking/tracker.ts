@@ -2,7 +2,8 @@ import type { EventDelivery } from '../events/event-delivery.js';
 import type { EventQueue, QueuedEvent } from '../events/event-queue.js';
 import type { Identity } from '../identity/identity.js';
 import type { KeyValueStorage } from '../storage/device-storage.js';
-import type { EventProperties } from '../types.js';
+import type { BeforeSendEvent, EventProperties, KiroraOptions } from '../types.js';
+import { jsonSnapshot, NotJsonError } from '../utils/json-snapshot.js';
 import type { Log } from '../utils/log.js';
 import { uuid } from '../utils/uuid.js';
 import type { TrackingConsent } from './consent.js';
@@ -19,6 +20,7 @@ import {
   keepSessionAlive,
   SESSION_STARTED_EVENT,
   touchSession,
+  type SessionStore,
 } from './session.js';
 
 /** Only what the tracker uses of each part, so it depends on no more. */
@@ -29,9 +31,15 @@ type TrackerDependencies = {
   consent: Pick<TrackingConsent, 'allowed'>;
   /** Shared across subdomains, so `www.` and `app.` see the same device and session. */
   siteStorage: KeyValueStorage;
+  /** Where the session and `device.id` are kept, per workspace. */
+  keys: { session: string; installationId: string };
   trackSessions: boolean;
+  beforeSend: KiroraOptions['beforeSend'];
   log: Log;
 };
+
+/** An event's owner: who was signed in when it was tracked, or null for nobody. */
+type Owner = string | null;
 
 /**
  * Turns what the app tracks into queued events: their time, page, session and device,
@@ -39,6 +47,9 @@ type TrackerDependencies = {
  * nothing here throws: a failure is logged, so it never breaks the host page.
  */
 export class Tracker {
+  /** True while `beforeSend` runs, so tracking from inside it is refused. */
+  private inBeforeSend = false;
+
   constructor(private readonly parts: TrackerDependencies) {}
 
   /** Builds the event right away so its time and page are accurate, then queues it. */
@@ -57,20 +68,36 @@ export class Tracker {
 
   /** Activity keeps the session alive, or starts a new one with `Session Started`. */
   noteActivity(): void {
-    this.safely(() => this.touchSession());
+    this.safely(() => this.touchSession(this.owner()));
   }
 
   /** Extends the current session without starting one, e.g. while the page is visible. */
   keepSessionAlive(): void {
     this.safely(() => {
-      if (this.sessionsOn) keepSessionAlive(this.parts.siteStorage);
+      if (this.sessionsOn) keepSessionAlive(this.sessionStore);
     });
+  }
+
+  /** Ends the session, so the next activity starts another: for a sign-out. */
+  endSession(): void {
+    this.safely(() => endSession(this.sessionStore));
   }
 
   /** Forgets queued events and the session, as when consent is withdrawn. */
   forget(): void {
-    void this.parts.queue.clearAll();
-    endSession(this.parts.siteStorage);
+    this.parts.queue
+      .clearAll()
+      .catch((error: unknown) => this.parts.log('error', "Couldn't clear events", error));
+    this.endSession();
+  }
+
+  private get sessionStore(): SessionStore {
+    return { storage: this.parts.siteStorage, key: this.parts.keys.session };
+  }
+
+  /** The user signed in now, who owns what's tracked now. */
+  private owner(): Owner {
+    return this.parts.identity.user?.subject ?? null;
   }
 
   /** The page is only looked at once consent allows it. */
@@ -85,35 +112,44 @@ export class Tracker {
     let snapshot: EventProperties;
     try {
       // Copied now, so changing the object after track() doesn't change the event.
-      snapshot = JSON.parse(JSON.stringify(properties)) as EventProperties;
+      snapshot = jsonSnapshot(properties) as EventProperties;
     } catch (error) {
-      this.parts.log('error', `${name} not tracked: its properties aren't JSON`, error);
+      this.parts.log(
+        'error',
+        `${name} not tracked: its properties hold ${reason(error)}`,
+      );
       return;
     }
+    // Decided now: whoever signs in or out later, this event stays this user's.
+    const owner = this.owner();
     page ??= pageContext();
-    const sessionId = this.touchSession(page);
-    this.enqueue(this.event(name, snapshot, page, sessionId));
+    const sessionId = this.touchSession(owner, page);
+    this.capture(owner, name, snapshot, page, sessionId);
   }
 
   /** Returns the session id, if sessions are on and tracking is allowed. */
-  private touchSession(page?: PageContext): string | undefined {
+  private touchSession(owner: Owner, page?: PageContext): string | undefined {
     if (!this.sessionsOn) return undefined;
-    const { sessionId, started } = touchSession(this.parts.siteStorage);
+    const { sessionId, started } = touchSession(this.sessionStore, owner);
     if (started) {
       page ??= pageContext();
-      this.enqueue(
-        this.event(
-          SESSION_STARTED_EVENT,
-          sessionStartedProperties(page),
-          page,
-          sessionId,
-        ),
+      this.capture(
+        owner,
+        SESSION_STARTED_EVENT,
+        sessionStartedProperties(page),
+        page,
+        sessionId,
       );
     }
     return sessionId;
   }
 
   private safely(step: () => void): void {
+    // An app's beforeSend that tracks would otherwise call itself without end.
+    if (this.inBeforeSend) {
+      this.parts.log('error', 'Not tracked: called from beforeSend');
+      return;
+    }
     try {
       step();
     } catch (error) {
@@ -126,34 +162,105 @@ export class Tracker {
     return this.parts.trackSessions && this.parts.consent.allowed;
   }
 
-  /** Queues as the current user (if any), then lets delivery decide when to send. */
-  private enqueue(event: QueuedEvent): void {
-    const { queue, identity, delivery, log } = this.parts;
-    queue.add(event, identity.user?.subject ?? null).then(
-      (waiting) => delivery.onEventQueued(waiting),
-      (error: unknown) => log('error', `${event.name} not tracked`, error),
-    );
-  }
-
-  /** `device.id` will let us link activity from before sign-in to the user later. */
-  private event(
+  /**
+   * Makes the event, passes it through `beforeSend`, and queues it as `owner`'s. Its time
+   * is taken first, so a slow hook doesn't move it.
+   */
+  private capture(
+    owner: Owner,
     name: string,
     properties: EventProperties,
     page: PageContext,
     sessionId: string | undefined,
-  ): QueuedEvent {
-    return {
-      idempotencyKey: uuid(),
+  ): void {
+    const occurredAt = eventTime().toISOString();
+    const event = this.redacted({
       name,
       properties,
-      occurredAt: eventTime().toISOString(),
       context: {
         ...page,
         ...(sessionId ? { sessionId } : {}),
-        device: { id: installationId(this.parts.siteStorage) },
+        device: {
+          id: installationId(this.parts.siteStorage, this.parts.keys.installationId),
+        },
       },
-    };
+    });
+    if (!event) return;
+    this.enqueue(
+      {
+        idempotencyKey: uuid(),
+        name,
+        properties: event.properties,
+        occurredAt,
+        context: event.context,
+      },
+      owner,
+    );
   }
+
+  /**
+   * The event as `beforeSend` leaves it, or undefined if it drops it. Only a failure's
+   * kind is logged, never the event: it may be what the hook was there to hide.
+   */
+  private redacted(event: BeforeSendEvent): BeforeSendEvent | undefined {
+    const { beforeSend, log } = this.parts;
+    if (!beforeSend) return event;
+    let answer: unknown;
+    this.inBeforeSend = true;
+    try {
+      // A copy of its own, so the hook can't change what the SDK holds.
+      answer = beforeSend(jsonSnapshot(event) as BeforeSendEvent);
+    } catch {
+      log('error', `${event.name} not tracked: beforeSend threw`);
+      return undefined;
+    } finally {
+      this.inBeforeSend = false;
+    }
+    if (answer === null) {
+      log('debug', `${event.name} dropped by beforeSend`);
+      return undefined;
+    }
+    if (typeof (answer as PromiseLike<unknown> | undefined)?.then === 'function') {
+      // Handled, so a rejection doesn't reach the page as unhandled.
+      Promise.resolve(answer).catch(() => undefined);
+      log(
+        'error',
+        `${event.name} not tracked: beforeSend must answer at once, not later`,
+      );
+      return undefined;
+    }
+    const { properties = {}, context = {} } = isObject(answer)
+      ? (answer as Partial<BeforeSendEvent>)
+      : {};
+    if (!isObject(answer) || !isObject(properties) || !isObject(context)) {
+      log('error', `${event.name} not tracked: beforeSend must answer an event or null`);
+      return undefined;
+    }
+    try {
+      return {
+        name: event.name,
+        properties: jsonSnapshot(properties) as EventProperties,
+        context: jsonSnapshot(context) as Record<string, unknown>,
+      };
+    } catch (error) {
+      log('error', `${event.name} not tracked: beforeSend answered ${reason(error)}`);
+      return undefined;
+    }
+  }
+
+  /** Queues as `owner`, then lets delivery decide when to send. */
+  private enqueue(event: QueuedEvent, owner: Owner): void {
+    const { queue, delivery, log } = this.parts;
+    queue.add(event, owner).then(
+      (waiting) => delivery.onEventQueued(waiting),
+      (error: unknown) => log('error', `${event.name} not tracked`, error),
+    );
+  }
+}
+
+/** What made a value unsendable, without the value. */
+function reason(error: unknown): string {
+  return error instanceof NotJsonError ? error.message : 'something JSON has no form for';
 }
 
 /** A plain object: not null, an array, or something like a Date that JSON turns into a string. */
