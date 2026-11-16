@@ -143,10 +143,13 @@ promises from `identify()` and the push methods that can reject in your applicat
 time it tries to send the user's queued events and detach this browser from their
 pushes; then it forgets the user and anything of theirs still unsent. If Kirora can't
 be told, the SDK cancels the browser's push subscription and keeps retrying the
-detachment in the background (for up to a day) while the page stays open. Those retries
-live in memory only: if the browser is offline at sign-out and the page closes, Kirora
-isn't told until the device is registered again, so sign-out can't promise the server
-stops pushes at once. The cancelled subscription stops them on this browser.
+detachment in the background (for up to a day) while the page stays open. A late retry
+never undoes a newer sign-in: it names the registration it's detaching, so if the same
+user signs in again meanwhile, in any tab, Kirora keeps their new registration, and if
+someone else has signed in, it leaves theirs alone. Those retries live in memory only: if
+the browser is offline at sign-out and the page closes, Kirora isn't told until the device
+is registered again, so sign-out can't promise the server stops pushes at once. The
+cancelled subscription stops them on this browser.
 
 Tokens stay in memory, so identification must run again after a reload. When a token is
 refused, the SDK can call `fetchUserToken` to refresh it; a supplied token alone cannot

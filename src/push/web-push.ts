@@ -50,7 +50,6 @@ type Cleanup = {
   retryDelayMs: number;
   /** No retry after this (epoch ms). */
   giveUpAt: number;
-  timer?: ReturnType<typeof setTimeout>;
 };
 
 const DEFAULT_SERVICE_WORKER_URL = '/kirora-sw.js';
@@ -74,8 +73,8 @@ export class WebPush {
   private readonly serviceWorkerUrl: string;
   /** The registration or detachment running now, if any. Never rejects. */
   private operations: Promise<void> = Promise.resolve();
-  /** Detachments still to finish, kept in memory only. */
-  private readonly cleanups = new Set<Cleanup>();
+  /** Detachments waiting to be retried, kept in memory only. */
+  private readonly retries = new Set<ReturnType<typeof setTimeout>>();
   private destroyed = false;
   /** The user whose latest registration failed, so it can't be counted as registered. */
   private failedFor: SignedInUser | undefined;
@@ -197,10 +196,9 @@ export class WebPush {
       this.lastRegistration(),
     );
     if (!current()) return;
-    const installationId = this.installationId();
     const answer = await this.api.request<DeviceAnswer>(
       'PUT',
-      `/devices/${installationId}`,
+      `/devices/${this.installationId()}`,
       {
         as: user,
         body: {
@@ -249,18 +247,21 @@ export class WebPush {
     if (!last?.pushAppId || !last.lastSeenAt || last.config !== config) return;
     const reported = last.denied && last.userSubject === user.subject;
     if (reported && Date.now() - last.at <= REGISTRATION_REFRESH_MS) return;
-    const installationId = this.installationId();
     let answer: DeviceAnswer;
     try {
-      answer = await this.api.request<DeviceAnswer>('PUT', `/devices/${installationId}`, {
-        as: user,
-        body: {
-          pushAppId: last.pushAppId,
-          permission: 'denied',
-          lastSeenAt: last.lastSeenAt,
-          ...localeAndTimezone(),
+      answer = await this.api.request<DeviceAnswer>(
+        'PUT',
+        `/devices/${this.installationId()}`,
+        {
+          as: user,
+          body: {
+            pushAppId: last.pushAppId,
+            permission: 'denied',
+            lastSeenAt: last.lastSeenAt,
+            ...localeAndTimezone(),
+          },
         },
-      });
+      );
     } catch (error) {
       // 409: registered again somewhere this browser doesn't know. 404: not this user's
       // device, or none. Nothing to say either way until permission is granted again.
@@ -306,15 +307,14 @@ export class WebPush {
       retryDelayMs: FIRST_CLEANUP_RETRY_MS,
       giveUpAt: Date.now() + CLEANUP_GIVE_UP_MS,
     };
-    this.cleanups.add(cleanup);
     return this.oneAtATime(() => this.attemptCleanup(cleanup, true, deadline));
   }
 
   /** Stops detachments still being retried, and anything else on a timer. */
   destroy(): void {
     this.destroyed = true;
-    for (const cleanup of this.cleanups) clearTimeout(cleanup.timer);
-    this.cleanups.clear();
+    for (const retry of this.retries) clearTimeout(retry);
+    this.retries.clear();
   }
 
   /** One attempt at `cleanup`, run in turn with registrations. */
@@ -323,7 +323,7 @@ export class WebPush {
     first: boolean,
     deadline?: number,
   ): Promise<void> {
-    if (!this.cleanups.has(cleanup) || this.destroyed) return;
+    if (this.destroyed) return;
     // Forgotten now, so the user signing in again registers again.
     if (first && this.lastRegistration()?.userSubject === cleanup.user.subject) {
       this.storage.removeItem(this.registrationKey);
@@ -340,17 +340,13 @@ export class WebPush {
         as: cleanup.user,
         timeoutMs: remaining !== undefined && remaining > 0 ? remaining : undefined,
       });
-      this.cleanups.delete(cleanup);
       this.log('debug', 'Detached this browser');
       return;
     } catch (error) {
       // 409: the user registered the browser again since, which Kirora kept. 404: there
       // was nothing of theirs here. Either way it's done, and the subscription is theirs.
       const done = error instanceof KiroraApiError && [404, 409].includes(error.status);
-      if (done) {
-        this.cleanups.delete(cleanup);
-        return;
-      }
+      if (done) return;
       if (first) await this.cancelSubscription();
       const retryable = !(error instanceof KiroraApiError) || error.retryable;
       const retryAt =
@@ -362,15 +358,16 @@ export class WebPush {
       // Destroyed while this attempt was on its way.
       if (this.destroyed) return;
       if (!retryable || retryAt > cleanup.giveUpAt) {
-        this.cleanups.delete(cleanup);
         this.log('error', "Couldn't detach this browser from the signed-out user", error);
         return;
       }
       if (first) this.log('debug', "Couldn't detach this browser yet; retrying", error);
       cleanup.retryDelayMs = Math.min(cleanup.retryDelayMs * 2, MAX_CLEANUP_RETRY_MS);
-      cleanup.timer = setTimeout(() => {
+      const retry = setTimeout(() => {
+        this.retries.delete(retry);
         void this.oneAtATime(() => this.attemptCleanup(cleanup, false));
       }, retryAt - Date.now());
+      this.retries.add(retry);
     }
   }
 
