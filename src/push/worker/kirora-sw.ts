@@ -2,6 +2,9 @@
 // `importScripts()` it from your own classic worker. It only handles Kirora pushes and
 // leaves everything else to your own handlers.
 
+import { base64UrlBytes } from '../../utils/base64url.js';
+import { savedSubscription, type SavedSubscription } from '../subscription-store.js';
+
 declare const self: ServiceWorkerGlobalScope;
 
 /** As Kirora sends it. Every field may be missing from an older or newer server. */
@@ -106,4 +109,75 @@ async function report(
       () => false,
     );
   if (!(await send())) await send();
+}
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(moveSubscription(event).catch(() => undefined));
+});
+
+/** Attempts at telling Kirora, and the longest wait between two. */
+const MOVE_ATTEMPTS = 3;
+const MAX_RETRY_WAIT_MS = 60_000;
+
+/**
+ * Tells Kirora the browser replaced the subscription the page registered, so the device
+ * keeps its user and stays reachable. The old subscription's `auth` key proves the device,
+ * as the worker has no user token. A device signed out or denied meanwhile stays off.
+ */
+async function moveSubscription(event: PushSubscriptionChangeEvent): Promise<void> {
+  const { scope, pushManager } = self.registration;
+  const saved = await savedSubscription(scope);
+  // Another service's subscription changed, or this browser never registered with Kirora.
+  if (
+    !saved ||
+    (event.oldSubscription &&
+      event.oldSubscription.endpoint !== saved.subscription.endpoint)
+  ) {
+    return;
+  }
+  // Rejects if permission was taken away: then there's nothing to move to.
+  const replacement =
+    event.newSubscription ??
+    (await pushManager.getSubscription()) ??
+    (await pushManager.subscribe({
+      userVisibleOnly: true,
+      // As bytes: not every supported browser takes the base64 string.
+      applicationServerKey: base64UrlBytes(saved.vapidPublicKey),
+    }));
+  const newSubscription = replacement.toJSON();
+  if (newSubscription.endpoint === saved.subscription.endpoint) return;
+  const body = JSON.stringify({
+    pushAppId: saved.pushAppId,
+    oldSubscription: saved.subscription,
+    newSubscription,
+  });
+  for (let attempt = 1; ; attempt++) {
+    const response = await fetch(saved.url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'kirora-client-key': saved.clientKey,
+        'kirora-sdk': saved.sdk,
+      },
+      body,
+    }).catch(() => undefined);
+    const status = response?.status ?? 0;
+    if (status === 204) {
+      const moved: SavedSubscription = { ...saved, subscription: newSubscription };
+      return void (await savedSubscription(scope, moved));
+    }
+    // 404: no device has the old subscription. 409: another device has the new one.
+    if (status === 404 || status === 409) {
+      return void (await savedSubscription(scope, null));
+    }
+    const retry = status === 0 || status === 429 || status >= 500;
+    if (!retry || attempt === MOVE_ATTEMPTS) return;
+    // Retry-After in seconds, or backoff; a date isn't worth parsing here.
+    const wait = Math.max(
+      Number(response?.headers.get('retry-after')) * 1000 || 0,
+      1000 * 2 ** attempt,
+    );
+    if (wait > MAX_RETRY_WAIT_MS) return;
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
 }

@@ -232,7 +232,8 @@ are separate settings.
 
    Repeat the copy when the SDK is updated, ideally as part of your app's build. The
    worker handles Kirora pushes and reports when they're shown, opened and clicked,
-   automatically.
+   automatically. When the browser replaces a push subscription, which it can do at any
+   time, the worker tells Kirora, so the browser keeps receiving pushes without a visit.
 
    **If your site already has a service worker** (e.g. a PWA), a scope can only have one,
    so don't add a second. Serve `kirora-sw.js` next to yours, import it, and tell the SDK
@@ -264,7 +265,8 @@ are separate settings.
    ```
 
 Browser permission and marketing consent are separate: `setPushConsent()` records whether
-the user agreed to receive marketing pushes.
+the user agreed to receive marketing pushes. Transactional pushes need only the browser
+permission.
 
 If the user blocks notifications for your site, the SDK tells Kirora the next time
 someone signs in on this browser, or when they answer the prompt with a block. Kirora
@@ -467,15 +469,16 @@ origin can read them. Tracking consent gates event, session and tracking device-
 storage; its decision is stored independently, as are push registrations when enabled.
 Initialization also briefly writes and removes `kirora:probe` to test storage availability.
 
-| Where                                          | Name                                               | Holds                                                            | Removed                                                                                                                     |
-| ---------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `localStorage`                                 | `kirora:events:<client key>@<api host>`            | Events waiting to be sent, with their properties and context     | Once Kirora answers for them; the user's at `logout()`; all on consent withdrawal. Oldest dropped past 1,000 events or 1 MB |
-| Cookie on your root domain, and `localStorage` | `kirora_session`, `kirora:session`                 | The session id and when it was last active                       | On consent withdrawal. A session ends after 30 minutes without activity                                                     |
-| Cookie on your root domain, and `localStorage` | `kirora_installation_id`, `kirora:installation-id` | `device.id`: a random id for this browser                        | On consent withdrawal, unless the browser is registered for push: then at `logout()`                                        |
-| `localStorage`                                 | `kirora:tracking-consent`                          | The visitor's tracking consent answer                            | Never; it's their answer                                                                                                    |
-| `localStorage`                                 | `kirora:push-registration:<client key>@<api host>` | Who this browser was registered for, its push endpoint, and when | After successful push detachment at `logout()`                                                                              |
-| The browser's push service                     | (the push subscription)                            | Where to deliver pushes                                          | If `logout()` can't reach Kirora; otherwise kept for the next user                                                          |
-| Memory only                                    |                                                    | The user token                                                   | When the page closes, or at `logout()`                                                                                      |
+| Where                                          | Name                                               | Holds                                                                                         | Removed                                                                                                                     |
+| ---------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `localStorage`                                 | `kirora:events:<client key>@<api host>`            | Events waiting to be sent, with their properties and context                                  | Once Kirora answers for them; the user's at `logout()`; all on consent withdrawal. Oldest dropped past 1,000 events or 1 MB |
+| Cookie on your root domain, and `localStorage` | `kirora_session`, `kirora:session`                 | The session id and when it was last active                                                    | On consent withdrawal. A session ends after 30 minutes without activity                                                     |
+| Cookie on your root domain, and `localStorage` | `kirora_installation_id`, `kirora:installation-id` | `device.id`: a random id for this browser                                                     | On consent withdrawal, unless the browser is registered for push: then at `logout()`                                        |
+| `localStorage`                                 | `kirora:tracking-consent`                          | The visitor's tracking consent answer                                                         | Never; it's their answer                                                                                                    |
+| `localStorage`                                 | `kirora:push-registration:<client key>@<api host>` | Who this browser was registered for, its push endpoint, and when                              | After successful push detachment at `logout()`                                                                              |
+| IndexedDB                                      | `kirora-push` database                             | The push subscription last registered, the client key and API address, for the service worker | When Kirora refuses a replaced subscription; replaced by the next registration                                              |
+| The browser's push service                     | (the push subscription)                            | Where to deliver pushes                                                                       | If `logout()` can't reach Kirora; otherwise kept for the next user                                                          |
+| Memory only                                    |                                                    | The user token                                                                                | When the page closes, or at `logout()`                                                                                      |
 
 The cookies are `SameSite=Lax`, `Secure` on HTTPS, and last a year; their value is the
 same as the `localStorage` copy, which restores a cleared cookie. If `localStorage` is
@@ -500,7 +503,7 @@ The script-tag snippet is inline, so it needs a `nonce` or a `sha256-` hash in
 
 A service worker gets its own CSP from the headers it's served with. If you set one
 there, its `connect-src` must allow Kirora's API too, which is where deliveries, opens
-and clicks are reported.
+and clicks are reported, and replaced subscriptions are sent.
 
 ## Naming events
 

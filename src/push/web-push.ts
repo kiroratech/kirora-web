@@ -1,11 +1,12 @@
-import type { ClientApi } from '../api/client-api.js';
+import { SDK_NAME, type ClientApi } from '../api/client-api.js';
 import type { Identity, SignedInUser } from '../identity/identity.js';
 import { KiroraApiError, KiroraError } from '../errors.js';
 import { readJson, type KeyValueStorage } from '../storage/device-storage.js';
 import { STORAGE_KEYS } from '../storage/keys.js';
 import { localeAndTimezone } from '../tracking/page-context.js';
-import { base64UrlDecode } from '../utils/base64url.js';
+import { base64UrlBytes } from '../utils/base64url.js';
 import { withTimeout } from '../utils/timeout.js';
+import { savedSubscription } from './subscription-store.js';
 import type { PushOptions, PushPermission } from '../types.js';
 import type { Log } from '../utils/log.js';
 
@@ -134,6 +135,17 @@ export class WebPush {
       lastSeenAt: answer?.lastSeenAt,
     };
     this.storage.setItem(this.registrationKey, JSON.stringify(registration));
+    // For the worker, to tell Kirora when the browser replaces this subscription.
+    await savedSubscription(worker.scope, {
+      url: `${this.api.baseUrl!}/push-subscription-change`,
+      clientKey: this.api.clientKey,
+      sdk: SDK_NAME,
+      pushAppId: pushApp.pushAppId,
+      vapidPublicKey: pushApp.vapidPublicKey,
+      subscription,
+    }).catch((error: unknown) => {
+      this.log('debug', "Couldn't keep the subscription for the service worker", error);
+    });
     this.log('debug', `Registered this browser with ${pushApp.name}`);
   }
 
@@ -386,10 +398,6 @@ function activated(registration: ServiceWorkerRegistration): Promise<void> {
       }
     });
   });
-}
-
-function base64UrlBytes(value: string): Uint8Array<ArrayBuffer> {
-  return Uint8Array.from(base64UrlDecode(value), (character) => character.charCodeAt(0));
 }
 
 function sameKey(current: ArrayBuffer | null, wanted: Uint8Array): boolean {

@@ -72,6 +72,7 @@ export function stubWebPush(subscribing: Promise<void> = Promise.resolve()) {
   };
   let current: Subscription | null = null;
   const registration = {
+    scope: 'https://example.com/',
     active: { scriptURL: 'https://example.com/kirora-sw.js' },
     pushManager: {
       getSubscription: () => Promise.resolve(current),
