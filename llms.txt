@@ -155,8 +155,8 @@ render that inside `<Suspense fallback={null}>`:
       <KiroraSessionFromCookies />
     </Suspense>
 
-**Sign-out:** `await kirora.logout()` before the app's own sign-out, and catch and log its
-errors so they never block signing out. If sign-out is a server action, a form POST or a
+**Sign-out:** `await kirora.logout()` before the app's own sign-out. It never rejects and
+returns within 5 seconds, so it can't block signing out; no try/catch is needed. If sign-out is a server action, a form POST or a
 library call like Auth.js `signOut()`, make the sign-out button a client component that
 awaits `kirora.logout()` first, then calls the action or submits the form. If a session
 ends some other way (expiry, another tab), nothing else is needed: the next `identify()`
@@ -167,8 +167,14 @@ takes over and the previous user's unsent events are never sent as the new one.
     kirora.track('Plan Upgraded', { plan: 'pro', seats: 5 });
 
 Names: object then past-tense action, Title Case (`Order Completed`, `Invoice Paid`).
-Details go in properties, not the name. Never start a name with `contact.`. Don't add
-tracking calls the developer didn't ask for, beyond page views.
+Details go in properties, not the name. Never start a name with `contact.`. Properties
+must be JSON (no functions, `NaN`, `Map`s or circular objects), or the event is dropped.
+Don't add tracking calls the developer didn't ask for, beyond page views.
+
+If the app has pages whose address carries a token or personal data (password reset or
+magic links, `?email=`), tell the developer and offer a `beforeSend` option that redacts
+it from `context.page` (`url`, `search`, `referrer`) and from event properties; it must
+return the event synchronously, or `null` to drop it.
 
 ## Step 6 (ask first): tracking consent
 
@@ -210,6 +216,9 @@ and pass its id as `push: { pushAppId: '…' }`; otherwise `push: true` is enoug
        if (permission === 'granted') await kirora.setPushConsent(true);
 
    Never call `requestPushPermission()` on page load: browsers block or penalise it.
+4. If the app has a notifications on/off setting, wire it to
+   `kirora.getPushStatus()` (`'enabled'` means on) and `kirora.setPushEnabled(on)`. That's
+   this browser's own switch, kept for whoever signs in; it is not marketing consent.
 
 ## Step 8: check it works
 
