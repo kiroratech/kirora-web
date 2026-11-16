@@ -1,0 +1,183 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { Kirora, type KiroraOptions } from '../src/index.js';
+import {
+  accepted,
+  fakeKirora,
+  tokenFor,
+  userOf,
+  type SentRequest,
+} from './fake-kirora.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+function client(options: Partial<KiroraOptions> = {}) {
+  return new Kirora({ clientKey: 'kirora_pk_a', logLevel: 'none', ...options });
+}
+
+type SentEvent = { name: string; context: { sessionId?: string } };
+
+/** Each event sent, with the user it was sent as. */
+function sentEvents(requests: SentRequest[]) {
+  return requests
+    .filter((request) => request.path === '/events/batch')
+    .flatMap((request) =>
+      (request.body as { events: SentEvent[] }).events.map((event) => ({
+        user: request.user,
+        name: event.name,
+        sessionId: event.context.sessionId,
+      })),
+    );
+}
+
+it('makes events from before sign-in the first user’s, never the next one’s', async () => {
+  // Ada's sends fail, as if offline; Bob's go.
+  const sent: [string | undefined, string][] = [];
+  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
+    const user = userOf(init);
+    if (user === 'ada') return Promise.resolve(new Response(null, { status: 503 }));
+    const batch = JSON.parse(String(init.body)) as { events: SentEvent[] };
+    sent.push(
+      ...batch.events.map((event): [string | undefined, string] => [user, event.name]),
+    );
+    return Promise.resolve(accepted(batch));
+  });
+  const kirora = client({ trackSessions: false });
+  kirora.track('Pricing Viewed');
+
+  await kirora.identify(tokenFor('ada'));
+  await kirora.flush();
+  // Bob replaces Ada without a logout.
+  await kirora.identify(tokenFor('bob'));
+  kirora.track('Invoice Paid');
+  await kirora.flush();
+  expect(sent).toEqual([['bob', 'Invoice Paid']]);
+  kirora.destroy();
+});
+
+it('lets only one of two tabs signing in as different users take an event', async () => {
+  const server = fakeKirora();
+  const signedOut = client({ trackSessions: false });
+  signedOut.track('Pricing Viewed');
+  await vi.waitFor(() =>
+    expect(
+      localStorage.getItem('kirora:events:kirora_pk_a@api.kirora.io'),
+    ).not.toBeNull(),
+  );
+  signedOut.destroy();
+
+  const adaTab = client({ trackSessions: false });
+  const bobTab = client({ trackSessions: false });
+  await Promise.all([adaTab.identify(tokenFor('ada')), bobTab.identify(tokenFor('bob'))]);
+  await Promise.all([adaTab.flush(), bobTab.flush()]);
+
+  expect(sentEvents(server.handled).map(({ name }) => name)).toEqual(['Pricing Viewed']);
+});
+
+it('adopts nothing for a sign-in whose token never arrives', async () => {
+  const server = fakeKirora();
+  const kirora = client({
+    trackSessions: false,
+    fetchUserToken: () => Promise.reject(new Error('offline')),
+  });
+  kirora.track('Pricing Viewed');
+  await expect(kirora.identify()).rejects.toThrow();
+  await kirora.identify(tokenFor('bob'));
+  await kirora.flush();
+  expect(sentEvents(server.handled).map(({ user }) => user)).toEqual(['bob']);
+});
+
+it('starts a new visit when the user changes, and after logout', async () => {
+  const server = fakeKirora();
+  const kirora = client();
+  await kirora.identify(tokenFor('ada'));
+  kirora.track('Pricing Viewed');
+  await kirora.flush();
+  await kirora.identify(tokenFor('bob'));
+  kirora.track('Plan Compared');
+  await kirora.flush();
+  await kirora.logout();
+  await kirora.identify(tokenFor('bob'));
+  kirora.track('Invoice Paid');
+  await kirora.flush();
+
+  const sent = sentEvents(server.handled);
+  expect(sent.map(({ user, name }) => [user, name])).toEqual([
+    ['ada', 'Session Started'],
+    ['ada', 'Pricing Viewed'],
+    ['bob', 'Session Started'],
+    ['bob', 'Plan Compared'],
+    ['bob', 'Session Started'],
+    ['bob', 'Invoice Paid'],
+  ]);
+  expect(new Set(sent.map(({ sessionId }) => sessionId)).size).toBe(3);
+});
+
+it('continues a visit from before sign-in, and across a reload, for its owner', async () => {
+  const server = fakeKirora();
+  const first = client();
+  first.track('Pricing Viewed');
+  await first.identify(tokenFor('ada'));
+  await first.flush();
+  first.destroy();
+
+  // The reload: the page loads before identify() is called again.
+  const reloaded = client();
+  await reloaded.identify(tokenFor('ada'));
+  reloaded.track('Invoice Paid');
+  await reloaded.flush();
+
+  const sent = sentEvents(server.handled);
+  expect(sent.map(({ name }) => name)).toEqual([
+    'Session Started',
+    'Pricing Viewed',
+    'Invoice Paid',
+  ]);
+  expect(new Set(sent.map(({ sessionId }) => sessionId)).size).toBe(1);
+});
+
+it('keeps each workspace’s visit, device id and consent apart', () => {
+  const a = client({ trackSessions: true });
+  const b = client({ clientKey: 'kirora_pk_b', trackSessions: true });
+  b.setTrackingConsent(false);
+  a.track('Pricing Viewed');
+
+  expect(localStorage.getItem('kirora:tracking-consent:kirora_pk_b@api.kirora.io')).toBe(
+    'refused',
+  );
+  expect(localStorage.getItem('kirora:tracking-consent:kirora_pk_a@api.kirora.io')).toBe(
+    null,
+  );
+  expect(localStorage.getItem('kirora:session:kirora_pk_a@api.kirora.io')).not.toBeNull();
+  expect(localStorage.getItem('kirora:session:kirora_pk_b@api.kirora.io')).toBeNull();
+  a.destroy();
+  b.destroy();
+});
+
+it('gives back the events a sign-in adopted when Kirora refuses its token', async () => {
+  const sent: [string | undefined, string][] = [];
+  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
+    const user = userOf(init);
+    if (user === 'mallory') return Promise.resolve(new Response(null, { status: 401 }));
+    const batch = JSON.parse(String(init.body)) as { events: SentEvent[] };
+    sent.push(
+      ...batch.events.map((event): [string | undefined, string] => [user, event.name]),
+    );
+    return Promise.resolve(accepted(batch));
+  });
+  const kirora = client({ trackSessions: false });
+  kirora.track('Pricing Viewed');
+  await kirora.identify(tokenFor('mallory'));
+  await kirora.flush();
+  await vi.waitFor(() =>
+    expect(localStorage.getItem('kirora:events:kirora_pk_a@api.kirora.io')).toContain(
+      '"owner":null',
+    ),
+  );
+  await kirora.identify(tokenFor('bob'));
+  await kirora.flush();
+  expect(sent).toEqual([['bob', 'Pricing Viewed']]);
+  kirora.destroy();
+});

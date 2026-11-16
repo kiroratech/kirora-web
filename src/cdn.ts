@@ -2,8 +2,11 @@ import * as sdk from './index.js';
 import type { KiroraOptions } from './index.js';
 import { asHeld, type HeldCall } from './tracking/page-context.js';
 
-/** Methods the loader snippet doesn't queue, as they can't wait: see `replay()`. */
-type Unqueued = 'requestPushPermission' | 'flush' | 'destroy';
+/**
+ * Methods the loader snippet doesn't queue: a prompt can't wait for the click to pass,
+ * and the rest answer something. See `replay()`.
+ */
+type Unqueued = 'requestPushPermission' | 'getPushStatus' | 'flush' | 'destroy';
 
 /** A call the loader snippet queued, with when and where it was made. */
 type QueuedCall = [method: keyof sdk.Kirora, args: unknown[], held: HeldCall];
@@ -37,6 +40,7 @@ if (Array.isArray(snippet) && snippet.options) {
   const kirora = asHeld(snippet.start, () => new sdk.Kirora(options));
   // A permission prompt must happen during the click, so these go straight through.
   snippet.requestPushPermission = () => kirora.requestPushPermission();
+  snippet.getPushStatus = () => kirora.getPushStatus();
   snippet.flush = () => kirora.flush();
   snippet.destroy = () => kirora.destroy();
   void replay(snippet, kirora);

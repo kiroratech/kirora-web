@@ -105,6 +105,8 @@ it('leaves nothing registered when logging out during a registration', async () 
 });
 
 it("keeps the next user registered when they sign in during a logout's sending", async () => {
+  // Alice's detachment still goes after Bob's registration: Kirora only detaches Alice's
+  // installations, so it can't undo Bob's.
   stubLocalStorage();
   stubWebPush();
   let holding = false;
@@ -121,7 +123,7 @@ it("keeps the next user registered when they sign in during a logout's sending",
   server.release();
   await loggedOut;
 
-  expect(deviceChanges(server.handled)).toEqual(['alice', 'bob']);
+  expect(deviceChanges(server.handled)).toEqual(['alice', 'bob', '-alice']);
   expect(savedRegistration()).toBe('bob');
   await kirora.setPushConsent(true);
   expect(server.requests.at(-1)).toMatchObject({ path: '/push-consent', user: 'bob' });
@@ -217,10 +219,14 @@ it('forgets the device id kept for detaching, once logout has detached the brows
   kirora.setTrackingConsent(true);
   await kirora.identify(tokenFor('alice'));
   kirora.setTrackingConsent(false);
-  expect(localStorage.getItem('kirora:installation-id')).not.toBeNull();
+  expect(
+    localStorage.getItem('kirora:installation-id:kirora_pk_a@api.kirora.io'),
+  ).not.toBeNull();
 
   await kirora.logout();
-  expect(localStorage.getItem('kirora:installation-id')).toBeNull();
+  expect(
+    localStorage.getItem('kirora:installation-id:kirora_pk_a@api.kirora.io'),
+  ).toBeNull();
 });
 
 it('reuses its own subscription where the browser cannot say which key made it', async () => {

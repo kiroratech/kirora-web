@@ -86,7 +86,7 @@ it('sends nothing already queued until the visitor consents', async () => {
 
 it('forgets what was queued when the visitor has already refused', async () => {
   await queueWithoutConsentRequired();
-  localStorage.setItem('kirora:tracking-consent', 'refused');
+  localStorage.setItem('kirora:tracking-consent:kirora_pk_test@api.kirora.io', 'refused');
   const sent = recordEvents();
   const kirora = consentClient();
 
@@ -129,4 +129,85 @@ it('honours a refusal even when consent is not required', async () => {
   later.track('Plan Upgraded');
   await later.flush();
   expect(sent.map((event) => event.name)).toEqual(['Plan Upgraded']);
+});
+
+it('collects from the moment of consent, without a page view for the page already open', async () => {
+  vi.stubGlobal('location', new URL('https://example.com/pricing'));
+  vi.stubGlobal('document', {
+    title: 'Pricing',
+    referrer: '',
+    cookie: '',
+    visibilityState: 'visible',
+    querySelector: () => null,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  });
+  vi.stubGlobal('history', { pushState: () => undefined, replaceState: () => undefined });
+  vi.stubGlobal('addEventListener', () => undefined);
+  vi.stubGlobal('removeEventListener', () => undefined);
+  const sent = recordEvents();
+  const kirora = new Kirora({
+    clientKey: 'kirora_pk_test',
+    requireTrackingConsent: true,
+    trackPageViews: true,
+    logLevel: 'none',
+  });
+  kirora.setTrackingConsent(true);
+  kirora.track('Plan Compared');
+  await kirora.identify(tokenFor('ada'));
+  await kirora.flush();
+  expect(sent.map((event) => event.name)).toEqual(['Session Started', 'Plan Compared']);
+  kirora.destroy();
+});
+
+it('tracks nothing it cannot be sure was not refused, until consent is given anew', async () => {
+  vi.stubGlobal('localStorage', {
+    getItem: () => {
+      throw new DOMException('Blocked', 'SecurityError');
+    },
+    setItem: () => {
+      throw new DOMException('Blocked', 'SecurityError');
+    },
+    removeItem: () => undefined,
+  });
+  const sent = recordEvents();
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const kirora = new Kirora({ clientKey: 'kirora_pk_test', trackSessions: false });
+  await kirora.identify(tokenFor('ada'));
+  kirora.track('Pricing Viewed');
+  await kirora.flush();
+  expect(sent).toEqual([]);
+
+  kirora.setTrackingConsent(true);
+  kirora.track('Plan Upgraded');
+  await kirora.flush();
+  expect(sent.map((event) => event.name)).toEqual(['Plan Upgraded']);
+  expect(errors.mock.calls.map(([message]) => String(message)).join('\n')).toContain(
+    "Can't save the tracking choice",
+  );
+  errors.mockRestore();
+  kirora.destroy();
+});
+
+it('cancels a batch already on its way when consent is withdrawn', async () => {
+  let signal: AbortSignal | undefined;
+  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
+    signal = init.signal ?? undefined;
+    return new Promise<Response>((_, reject) =>
+      signal?.addEventListener('abort', () => reject(new DOMException('', 'AbortError'))),
+    );
+  });
+  const kirora = new Kirora({
+    clientKey: 'kirora_pk_test',
+    trackSessions: false,
+    logLevel: 'none',
+  });
+  await kirora.identify(tokenFor('ada'));
+  kirora.track('Pricing Viewed');
+  const flushed = kirora.flush();
+  await vi.waitFor(() => expect(signal).toBeDefined());
+  kirora.setTrackingConsent(false);
+  await flushed;
+  expect(signal!.aborted).toBe(true);
+  kirora.destroy();
 });
