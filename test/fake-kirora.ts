@@ -1,4 +1,5 @@
 import { vi } from 'vitest';
+import { Kirora, type KiroraOptions } from '../src/index.js';
 
 /** An event as `POST /events/batch` carries it. */
 type SentEvent = {
@@ -178,4 +179,15 @@ export function fakeKirora(
     /** Answers every held call. */
     release: () => held.splice(0).forEach((answer) => answer()),
   };
+}
+
+/** A client with push on and sessions off, logging nothing: what push tests start from. */
+export function pushClient(options: Partial<KiroraOptions> = {}) {
+  return new Kirora({
+    clientKey: 'kirora_pk_a',
+    trackSessions: false,
+    push: true,
+    logLevel: 'none',
+    ...options,
+  });
 }

@@ -48,8 +48,6 @@ export class EventDelivery {
    */
   private delayFromServer = false;
   private destroyed = false;
-  /** Set when an event too large for keepalive was held back while the page was hidden. */
-  private waitingForVisible = false;
   /**
    * Cancels the batches being sent, e.g. as consent is withdrawn: one for the user
    * signed in now, and one still under way for a user who has since signed out.
@@ -68,13 +66,6 @@ export class EventDelivery {
   destroy(): void {
     this.destroyed = true;
     this.stop();
-  }
-
-  /** The page is shown again: sends what was held back while it was hidden. */
-  onVisible(): void {
-    if (!this.waitingForVisible) return;
-    this.waitingForVisible = false;
-    void this.flush();
   }
 
   /**
@@ -151,20 +142,7 @@ export class EventDelivery {
       this.identity.user === user && !this.destroyed && this.consent.allowed;
     while (mayStillSend()) {
       const hidden = isPageHidden();
-      const oldest = await this.queue.oldest(maxEvents, user.subject);
-      // While hidden, an event too large for keepalive waits for the page to be shown
-      // again (a request without keepalive could be cut off as the tab closes); the
-      // events behind it still go.
-      const sendable = hidden
-        ? oldest.filter(
-            (event) => eventBytes(event) + ENVELOPE_BYTES <= MAX_KEEPALIVE_BYTES,
-          )
-        : oldest;
-      if (sendable.length < oldest.length) this.waitingForVisible = true;
-      const { batch } = fitBatch(
-        sendable,
-        hidden ? MAX_KEEPALIVE_BYTES : MAX_BATCH_BYTES,
-      );
+      const batch = fitBatch(await this.queue.oldest(maxEvents, user.subject), hidden);
       // Consent may have been withdrawn, or the user changed, while the queue was read.
       if (batch.length === 0 || !mayStillSend()) return;
       const outcome = await this.sendBatch(user, batch, hidden);
@@ -263,29 +241,25 @@ export class EventDelivery {
   private acknowledgedKeys(sent: unknown, batchKeys: ReadonlySet<string>): Set<string> {
     const results = (sent as { results?: unknown } | undefined)?.results;
     if (!Array.isArray(results)) return new Set();
-    /** Each key's refusal code, or null once recorded; unreadable answers are left out. */
-    const answers = new Map<string, string | null>();
-    const repeated = new Set<string>();
+    const answers = new Map<string, BatchResult[]>();
     for (const result of results as BatchResult[]) {
       const key = result?.idempotencyKey;
       if (typeof key !== 'string' || !batchKeys.has(key)) continue;
-      if (answers.has(key) || repeated.has(key)) {
-        repeated.add(key);
-        continue;
-      }
-      const code = refusalCode(result);
-      if (code !== undefined) answers.set(key, code);
-      else if (isReceipt(result)) answers.set(key, null);
-      // Unreadable: neither. Counted as answered, so a second answer is a repeat.
-      else repeated.add(key);
+      answers.set(key, [...(answers.get(key) ?? []), result]);
     }
     const settled = new Set<string>();
     const refusals = new Map<string, number>();
-    for (const [key, code] of answers) {
-      if (repeated.has(key)) continue;
-      if (code !== null && RETRYABLE_EVENT_CODES.includes(code)) continue;
+    for (const [key, [result, ...more]] of answers) {
+      // Answered more than once could mean either.
+      if (more.length > 0) continue;
+      const code = refusalCode(result!);
+      if (code === undefined) {
+        if (isReceipt(result!)) settled.add(key);
+        continue;
+      }
+      if (RETRYABLE_EVENT_CODES.includes(code)) continue;
       settled.add(key);
-      if (code !== null) refusals.set(code, (refusals.get(code) ?? 0) + 1);
+      refusals.set(code, (refusals.get(code) ?? 0) + 1);
     }
     for (const [code, count] of refusals) {
       this.log('error', `${count} events refused by Kirora: ${code}`);
@@ -327,20 +301,24 @@ export class EventDelivery {
   }
 }
 
-/** As many events as fit in `maxBytes`, but always at least one, and their size. */
-function fitBatch(
-  events: QueuedEvent[],
-  maxBytes: number,
-): { batch: QueuedEvent[]; bytes: number } {
+/**
+ * As many of `events`, oldest first, as fit in one request: 200 KB, or 60 KB while the
+ * page is hidden, as keepalive allows. Always at least one, except that while hidden an
+ * event too large for keepalive is skipped: it waits for the page to be shown again (a
+ * request without keepalive could be cut off as the tab closes), and those behind it go.
+ */
+function fitBatch(events: QueuedEvent[], hidden: boolean): QueuedEvent[] {
+  const maxBytes = hidden ? MAX_KEEPALIVE_BYTES : MAX_BATCH_BYTES;
+  const batch: QueuedEvent[] = [];
   let bytes = ENVELOPE_BYTES;
-  for (const [index, event] of events.entries()) {
+  for (const event of events) {
     const size = eventBytes(event);
-    if (bytes + size > maxBytes && index > 0) {
-      return { batch: events.slice(0, index), bytes };
-    }
+    if (hidden && ENVELOPE_BYTES + size > maxBytes) continue;
+    if (batch.length > 0 && bytes + size > maxBytes) break;
+    batch.push(event);
     bytes += size;
   }
-  return { batch: events, bytes };
+  return batch;
 }
 
 /** One event's answer in `POST /events/batch`, as far as it can be trusted. */

@@ -1,6 +1,8 @@
 import { beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import {
-  savedSubscription,
+  forgetSubscription,
+  readSubscription,
+  saveSubscription,
   type SavedSubscription,
 } from '../src/push/subscription-store.js';
 import { stubIndexedDB } from './fake-indexeddb.js';
@@ -56,7 +58,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   stubIndexedDB();
-  await savedSubscription(SCOPE, saved);
+  await saveSubscription(SCOPE, saved);
   current = null;
   subscribedWith = undefined;
   sent = [];
@@ -108,7 +110,7 @@ it('tells Kirora of the new subscription with the client key, and keeps it', asy
     },
   ]);
   expect(sent[0]!.headers).not.toHaveProperty('authorization');
-  expect((await savedSubscription(SCOPE))?.subscription).toEqual(replacement.toJSON());
+  expect((await readSubscription(SCOPE))?.subscription).toEqual(replacement.toJSON());
 });
 
 it('subscribes again with the same key when the browser gives no new subscription', async () => {
@@ -137,7 +139,7 @@ it("leaves another service's subscription change, and a browser never registered
     oldSubscription: subscription('https://push.example.com/theirs'),
     newSubscription: subscription('https://push.example.com/theirs-new'),
   });
-  await savedSubscription(SCOPE, null);
+  await forgetSubscription(SCOPE);
   await change({ newSubscription: subscription('https://push.example.com/new') });
   expect(sent).toEqual([]);
 });
@@ -163,7 +165,7 @@ it.each([404, 409])(
     answers = [() => Promise.resolve(new Response(null, { status }))];
     await change({ newSubscription: subscription('https://push.example.com/new') });
     expect(sent).toHaveLength(1);
-    expect(await savedSubscription(SCOPE)).toBeUndefined();
+    expect(await readSubscription(SCOPE)).toBeUndefined();
   },
 );
 
@@ -188,7 +190,7 @@ it('retries a 429 after its Retry-After, a 5xx and a network failure with backof
     await vi.advanceTimersByTimeAsync(4_000);
     await done;
     expect(sent).toHaveLength(3);
-    expect((await savedSubscription(SCOPE))?.subscription.endpoint).toBe(
+    expect((await readSubscription(SCOPE))?.subscription.endpoint).toBe(
       'https://push.example.com/new',
     );
   } finally {
@@ -229,7 +231,7 @@ it('gives up after three attempts, or on a wait too long to keep the worker for'
     await change({ newSubscription: subscription('https://push.example.com/new') });
     expect(sent).toHaveLength(1);
     // Kept, as Kirora still has the old one.
-    expect((await savedSubscription(SCOPE))?.subscription).toEqual(saved.subscription);
+    expect((await readSubscription(SCOPE))?.subscription).toEqual(saved.subscription);
   } finally {
     vi.useRealTimers();
   }

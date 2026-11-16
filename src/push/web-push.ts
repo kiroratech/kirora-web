@@ -6,7 +6,7 @@ import { STORAGE_KEYS } from '../storage/keys.js';
 import { localeAndTimezone } from '../tracking/page-context.js';
 import { base64UrlBytes } from '../utils/base64url.js';
 import { withTimeout } from '../utils/timeout.js';
-import { savedSubscription } from './subscription-store.js';
+import { forgetSubscription, saveSubscription } from './subscription-store.js';
 import type { PushOptions, PushPermission, PushStatus } from '../types.js';
 import type { Log } from '../utils/log.js';
 
@@ -139,20 +139,18 @@ export class WebPush {
     if (Notification.permission !== 'granted') return 'unanswered';
     await this.operations;
     const { user } = this.identity;
-    const last = this.lastRegistration();
     const registered =
       user !== null &&
       this.failedFor !== user &&
       !this.disabled &&
-      last !== null &&
-      !last.denied &&
-      last.userSubject === user.subject &&
-      last.config === this.config(this.options);
+      this.registeredFor(user.subject, this.config(this.options)) !== undefined;
+    if (!registered) return 'disabled';
     // The browser may have dropped its subscription since. One the worker replaced (and
     // told Kirora about) has a new endpoint, so any subscription counts.
-    const subscribed = async () =>
-      Boolean(await currentSubscription(this.serviceWorkerUrl).catch(() => undefined));
-    return registered && (await subscribed()) ? 'enabled' : 'disabled';
+    const subscription = await currentSubscription(this.serviceWorkerUrl).catch(
+      () => undefined,
+    );
+    return subscription ? 'enabled' : 'disabled';
   }
 
   /**
@@ -226,7 +224,7 @@ export class WebPush {
     this.storage.setItem(this.registrationKey, JSON.stringify(registration));
     this.finishCleanups(user, installationId, pushApp.pushAppId);
     // For the worker, to tell Kirora when the browser replaces this subscription.
-    await savedSubscription(worker.scope, {
+    await saveSubscription(worker.scope, {
       url: `${this.api.baseUrl!}/push-subscription-change`,
       clientKey: this.api.clientKey,
       sdk: SDK_NAME,
@@ -325,20 +323,17 @@ export class WebPush {
   ): Promise<void> {
     // Done meanwhile, by a registration that took the browser over.
     if (!this.cleanups.has(cleanup) || this.destroyed) return;
-    if (first) {
-      // Forgotten now, so the user signing in again registers again.
-      if (this.lastRegistration()?.userSubject === cleanup.user.subject) {
-        this.storage.removeItem(this.registrationKey);
-      }
+    // Forgotten now, so the user signing in again registers again.
+    if (first && this.lastRegistration()?.userSubject === cleanup.user.subject) {
+      this.storage.removeItem(this.registrationKey);
     }
     const remaining = deadline === undefined ? undefined : deadline - Date.now();
     try {
       await this.api.request('DELETE', `/devices/${cleanup.installationId}`, {
+        // While the user is still signed in, an expired token is refreshed as for any
+        // call. Once they've signed out, a refresh finds them gone and gives up, so a
+        // token never comes through the next user's fetchUserToken.
         as: cleanup.user,
-        // While the user is still signed in (the first attempt at logout, or turning push
-        // off), an expired token is refreshed as for any call. Once they've signed out, a
-        // refresh finds them gone and gives up, so it's never through the next user's.
-        refresh: true,
         timeoutMs: remaining !== undefined && remaining > 0 ? remaining : undefined,
       });
       this.cleanups.delete(cleanup);
@@ -392,16 +387,17 @@ export class WebPush {
 
   /** Cancels the browser's push subscription, logging a failure. Never rejects. */
   private async cancelSubscription(): Promise<void> {
-    // Forgotten first, or the worker could subscribe the browser again when the browser
-    // reports the subscription gone.
+    if (!webPushSupported()) return;
     try {
       const worker = await navigator.serviceWorker.getRegistration(this.serviceWorkerUrl);
-      if (worker) await savedSubscription(worker.scope, null);
-    } catch (error) {
-      this.log('debug', "Couldn't forget the subscription kept for the worker", error);
-    }
-    try {
-      if (!(await unsubscribe(this.serviceWorkerUrl))) {
+      if (!worker) return;
+      // Forgotten first, or the worker could subscribe the browser again when the browser
+      // reports the subscription gone.
+      await forgetSubscription(worker.scope).catch((error: unknown) => {
+        this.log('debug', "Couldn't forget the subscription kept for the worker", error);
+      });
+      const subscription = await worker.pushManager.getSubscription();
+      if (subscription && !(await subscription.unsubscribe())) {
         this.log('error', "Couldn't cancel this browser's push subscription");
       }
     } catch (error) {
@@ -432,16 +428,27 @@ export class WebPush {
     return readJson(this.storage, this.registrationKey) as PushRegistration | null;
   }
 
+  /** The saved registration, if it's a granted one for this user and configuration. */
+  private registeredFor(
+    userSubject: string,
+    config: string,
+  ): PushRegistration | undefined {
+    const last = this.lastRegistration();
+    return last &&
+      !last.denied &&
+      last.userSubject === userSubject &&
+      last.config === config
+      ? last
+      : undefined;
+  }
+
   /** True if this user, configuration and subscription were registered in the last day. */
   private async registrationIsFresh(
     userSubject: string,
     config: string,
   ): Promise<boolean> {
-    const last = this.lastRegistration();
-    if (!last || last.denied || Date.now() - last.at > REGISTRATION_REFRESH_MS) {
-      return false;
-    }
-    if (last.userSubject !== userSubject || last.config !== config) return false;
+    const last = this.registeredFor(userSubject, config);
+    if (!last || Date.now() - last.at > REGISTRATION_REFRESH_MS) return false;
     return last.endpoint === (await currentSubscription(this.serviceWorkerUrl))?.endpoint;
   }
 
@@ -554,13 +561,6 @@ async function readyRegistration(
   // A worker stuck installing would otherwise hold up every later registration.
   await withTimeout(activated(registration), WORKER_ACTIVATION_TIMEOUT_MS);
   return registration;
-}
-
-/** Cancels this browser's push subscription. True if there's none left. */
-async function unsubscribe(serviceWorkerUrl: string): Promise<boolean> {
-  if (!webPushSupported()) return true;
-  const subscription = await currentSubscription(serviceWorkerUrl);
-  return subscription ? subscription.unsubscribe() : true;
 }
 
 /** The current subscription, without registering a service worker. */
