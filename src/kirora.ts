@@ -140,7 +140,10 @@ export class Kirora {
           onHidden: sendNow,
           onOnline: sendNow,
           // Returning is activity, and time on a visible page never ends a visit.
-          onReturn: () => this.tracker.noteActivity(),
+          onReturn: () => {
+            this.tracker.noteActivity();
+            this.delivery.onVisible();
+          },
           whileVisible: () => this.tracker.keepSessionAlive(),
         },
         SESSION_KEEPALIVE_MS,

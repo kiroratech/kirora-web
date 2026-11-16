@@ -259,3 +259,35 @@ it('keeps an event too large for keepalive while hidden, sending those behind it
   expect(sent.map((event) => event.name)).toEqual(['Invoice Paid', 'Document Saved']);
   kirora.destroy();
 });
+
+it('sends a class instance as its own fields', async () => {
+  const sent = recordEvents();
+  class Order {
+    constructor(
+      readonly id: string,
+      readonly total: number,
+    ) {}
+  }
+  const kirora = client();
+  kirora.track('Order Placed', { order: new Order('A-1', 49.99) });
+  await kirora.identify(tokenFor('ada'));
+  await kirora.flush();
+  expect(sent[0]!.properties).toEqual({ order: { id: 'A-1', total: 49.99 } });
+});
+
+it('stops resending with a refused token that cannot be refreshed', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  let sends = 0;
+  vi.stubGlobal('fetch', () => {
+    sends++;
+    return Promise.resolve(new Response(null, { status: 401 }));
+  });
+  const kirora = client();
+  kirora.track('Invoice Paid');
+  await kirora.identify(tokenFor('ada'));
+  await kirora.flush();
+  await vi.advanceTimersByTimeAsync(60 * 60_000);
+  expect(sends).toBe(1);
+  kirora.destroy();
+  vi.useRealTimers();
+});

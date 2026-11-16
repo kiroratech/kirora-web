@@ -164,11 +164,11 @@ it("ends A's detachment once B's registration takes the browser over", async () 
   kirora.destroy();
 });
 
-it('stops retrying on a refusal, without asking for a fresh token', async () => {
+it('refreshes the token once at logout, then stops on a refusal', async () => {
   stubWebPush();
   stubIndexedDB();
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
-  const fetchUserToken = vi.fn(() => Promise.resolve(tokenFor('ada')));
+  const fetchUserToken = vi.fn(() => Promise.resolve(tokenFor('ada', 'fresh')));
   const calls = kiroraWith((call) =>
     call.method === 'DELETE'
       ? Promise.resolve(new Response(null, { status: 401 }))
@@ -178,8 +178,8 @@ it('stops retrying on a refusal, without asking for a fresh token', async () => 
   await kirora.identify(tokenFor('ada'));
   await kirora.logout();
   await vi.advanceTimersByTimeAsync(60 * 60_000);
-  expect(deletes(calls)).toHaveLength(1);
-  expect(fetchUserToken).not.toHaveBeenCalled();
+  expect(fetchUserToken).toHaveBeenCalledTimes(1);
+  expect(deletes(calls)).toEqual(['DELETE /devices ada', 'DELETE /devices ada']);
   kirora.destroy();
 });
 

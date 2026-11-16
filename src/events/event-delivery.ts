@@ -48,8 +48,13 @@ export class EventDelivery {
    */
   private delayFromServer = false;
   private destroyed = false;
-  /** Cancels the batch being sent, e.g. as consent is withdrawn. */
-  private sending: AbortController | undefined;
+  /** Set when an event too large for keepalive was held back while the page was hidden. */
+  private waitingForVisible = false;
+  /**
+   * Cancels the batches being sent, e.g. as consent is withdrawn: one for the user
+   * signed in now, and one still under way for a user who has since signed out.
+   */
+  private readonly sending = new Set<AbortController>();
 
   constructor(
     private readonly api: ClientApi,
@@ -65,13 +70,20 @@ export class EventDelivery {
     this.stop();
   }
 
+  /** The page is shown again: sends what was held back while it was hidden. */
+  onVisible(): void {
+    if (!this.waitingForVisible) return;
+    this.waitingForVisible = false;
+    void this.flush();
+  }
+
   /**
    * Cancels the scheduled send and the batch on its way, as tracking consent is
    * withdrawn. What Kirora already accepted can't be recalled.
    */
   cancel(): void {
     this.stop();
-    this.sending?.abort();
+    for (const sending of this.sending) sending.abort();
   }
 
   /** After an event is queued: send at once if enough wait, otherwise soon. */
@@ -143,12 +155,14 @@ export class EventDelivery {
       // While hidden, an event too large for keepalive waits for the page to be shown
       // again (a request without keepalive could be cut off as the tab closes); the
       // events behind it still go.
+      const sendable = hidden
+        ? oldest.filter(
+            (event) => eventBytes(event) + ENVELOPE_BYTES <= MAX_KEEPALIVE_BYTES,
+          )
+        : oldest;
+      if (sendable.length < oldest.length) this.waitingForVisible = true;
       const { batch } = fitBatch(
-        hidden
-          ? oldest.filter(
-              (event) => eventBytes(event) + ENVELOPE_BYTES <= MAX_KEEPALIVE_BYTES,
-            )
-          : oldest,
+        sendable,
         hidden ? MAX_KEEPALIVE_BYTES : MAX_BATCH_BYTES,
       );
       // Consent may have been withdrawn, or the user changed, while the queue was read.
@@ -181,7 +195,8 @@ export class EventDelivery {
     keepalive: boolean,
   ): Promise<Set<string> | 'split' | 'stop'> {
     const batchKeys = new Set(batch.map((event) => event.idempotencyKey));
-    const sending = (this.sending = new AbortController());
+    const sending = new AbortController();
+    this.sending.add(sending);
     try {
       const sent = await this.api.request<unknown>('POST', '/events/batch', {
         // Lets the server correct for clock skew.
@@ -198,7 +213,7 @@ export class EventDelivery {
       if (sending.signal.aborted) return 'stop';
       return this.classifyFailure(error, batchKeys);
     } finally {
-      if (this.sending === sending) this.sending = undefined;
+      this.sending.delete(sending);
     }
   }
 
@@ -218,7 +233,9 @@ export class EventDelivery {
     // keeps handing out refused tokens would otherwise be asked again at every send.
     if (error.status === 401) {
       this.log('error', 'Events not sent', error);
-      this.retryLater();
+      // Worth trying again only if a fresh token can be asked for; a token passed to
+      // identify() would be refused every time.
+      if (this.identity.canRefresh) this.retryLater();
       return 'stop';
     }
     // Too large or invalid: retry in halves until we isolate the bad event, so the rest of
