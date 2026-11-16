@@ -42,8 +42,6 @@ export class ClientApi {
   constructor(
     options: ClientApiOptions,
     private readonly identity: Identity,
-    /** Told when Kirora refuses `user`'s token for good, even after a refresh. */
-    private readonly onRefused: (user: SignedInUser) => void,
   ) {
     const apiUrl = options.apiUrl ?? DEFAULT_API_URL;
     const url = urlOf(apiUrl);
@@ -73,36 +71,27 @@ export class ClientApi {
     const user = options.as ?? this.identity.user;
     if (!user) throw new KiroraError('call identify() with a user token first');
     const sentToken = user.token;
-    const answer = await this.send(this.baseUrl, method, path, user, sentToken, options);
+    const answer = await this.send(this.baseUrl, method, path, sentToken, options);
     if (answer !== REFUSED) return answer as Data | undefined;
 
     // Kirora refused the token: get a fresh one, once, and try again with it.
     const freshToken = await this.identity.refresh(user, sentToken);
     if (freshToken) {
-      const retried = await this.send(
-        this.baseUrl,
-        method,
-        path,
-        user,
-        freshToken,
-        options,
-      );
+      const retried = await this.send(this.baseUrl, method, path, freshToken, options);
       if (retried !== REFUSED) return retried as Data | undefined;
     }
-    this.onRefused(user);
     throw new KiroraApiError(401, undefined, 'Kirora answered 401');
   }
 
   /**
    * One call, answer and all: the timeout covers reading the body too, since a body that
    * stops arriving would otherwise hold the call open for good. Returns `REFUSED` for a
-   * 401, so the caller can refresh the token. A success confirms `user`.
+   * 401, so the caller can refresh the token.
    */
   private async send(
     baseUrl: string,
     method: string,
     path: string,
-    user: SignedInUser,
     userToken: string,
     options: RequestOptions,
   ): Promise<unknown> {
@@ -131,8 +120,6 @@ export class ClientApi {
         return REFUSED;
       }
       if (!response.ok) throw await toApiError(response);
-      // Only a success proves Kirora took the token: a proxy's 502 never looked at it.
-      user.confirmed = true;
       if (response.status === 204) return undefined;
       return ((await response.json()) as { data: unknown }).data;
     };

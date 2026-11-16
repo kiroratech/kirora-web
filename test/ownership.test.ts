@@ -264,3 +264,39 @@ it('never signs out a user who signs in just after logout() is called', async ()
   ]);
   kirora.destroy();
 });
+
+it("doesn't hold back the next user's events for a signed-out user's failed send", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  const sent: [string | undefined, string][] = [];
+  let failAdasSend: (() => void) | undefined;
+  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
+    const user = userOf(init);
+    const batch = JSON.parse(String(init.body)) as { events: SentEvent[] };
+    if (user === 'ada') {
+      // Ada's send hangs, then fails with a long Retry-After once Bob is signed in.
+      return new Promise<Response>((resolve) => {
+        failAdasSend = () =>
+          resolve(new Response(null, { status: 503, headers: { 'retry-after': '600' } }));
+      });
+    }
+    sent.push(
+      ...batch.events.map((event): [string | undefined, string] => [user, event.name]),
+    );
+    return Promise.resolve(accepted(batch));
+  });
+  const kirora = client({ trackSessions: false });
+  await kirora.identify(tokenFor('ada'));
+  kirora.track('Invoice Paid');
+  void kirora.flush();
+  // Her logout gives up waiting after 5 seconds.
+  const loggedOut = kirora.logout();
+  await vi.advanceTimersByTimeAsync(5_000);
+  await loggedOut;
+
+  await kirora.identify(tokenFor('bob'));
+  kirora.track('Plan Upgraded');
+  failAdasSend!();
+  await vi.advanceTimersByTimeAsync(31_000);
+  expect(sent).toEqual([['bob', 'Plan Upgraded']]);
+  kirora.destroy();
+});
