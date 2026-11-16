@@ -299,3 +299,33 @@ it('answers disabled when the browser dropped the registered subscription', asyn
   expect(await kirora.getPushStatus()).toBe('disabled');
   kirora.destroy();
 });
+
+it('refreshes an expired token to turn push off, as the user is still signed in', async () => {
+  stubWebPush();
+  stubIndexedDB();
+  let expired = true;
+  const calls = kiroraWith((call) => {
+    if (call.method !== 'DELETE' || !expired) return undefined;
+    expired = false;
+    return Promise.resolve(new Response(null, { status: 401 }));
+  });
+  const fetchUserToken = vi.fn(() => Promise.resolve(tokenFor('ada', 'fresh')));
+  const kirora = pushClient({ fetchUserToken });
+  await kirora.identify(tokenFor('ada'));
+  await kirora.setPushEnabled(false);
+  expect(fetchUserToken).toHaveBeenCalledTimes(1);
+  expect(deletes(calls)).toEqual(['DELETE /devices ada', 'DELETE /devices ada']);
+  kirora.destroy();
+});
+
+it('forgets the subscription kept for the worker once push is turned off', async () => {
+  stubWebPush();
+  const databases = stubIndexedDB();
+  kiroraWith();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('ada'));
+  expect(databases.get('subscriptions')?.size).toBe(1);
+  await kirora.setPushEnabled(false);
+  expect(databases.get('subscriptions')?.size).toBe(0);
+  kirora.destroy();
+});

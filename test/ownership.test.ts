@@ -181,3 +181,66 @@ it('gives back the events a sign-in adopted when Kirora refuses its token', asyn
   expect(sent).toEqual([['bob', 'Pricing Viewed']]);
   kirora.destroy();
 });
+
+it('keeps the user id out of the session cookie', () => {
+  const cookies: string[] = [];
+  vi.stubGlobal('location', new URL('https://example.com/'));
+  vi.stubGlobal('document', {
+    title: '',
+    referrer: '',
+    visibilityState: 'visible',
+    querySelector: () => null,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    get cookie() {
+      return '';
+    },
+    set cookie(value: string) {
+      cookies.push(value);
+    },
+  });
+  vi.stubGlobal('addEventListener', () => undefined);
+  vi.stubGlobal('removeEventListener', () => undefined);
+  fakeKirora();
+  const kirora = client();
+  return kirora.identify(tokenFor('ada@example.com')).then(() => {
+    kirora.track('Pricing Viewed');
+    expect(cookies.some((cookie) => cookie.startsWith('kirora_session_'))).toBe(true);
+    expect(cookies.join('\n')).not.toContain('ada');
+    kirora.destroy();
+  });
+});
+
+it('gives back adopted events after a 502, as a gateway never checked the token', async () => {
+  const sent: [string | undefined, string][] = [];
+  let gatewayDown = true;
+  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
+    const user = userOf(init);
+    if (user === 'mallory') {
+      if (gatewayDown) {
+        gatewayDown = false;
+        return Promise.resolve(new Response(null, { status: 502 }));
+      }
+      return Promise.resolve(new Response(null, { status: 401 }));
+    }
+    const batch = JSON.parse(String(init.body)) as { events: SentEvent[] };
+    sent.push(
+      ...batch.events.map((event): [string | undefined, string] => [user, event.name]),
+    );
+    return Promise.resolve(accepted(batch));
+  });
+  const kirora = client({ trackSessions: false });
+  kirora.track('Pricing Viewed');
+  await kirora.identify(tokenFor('mallory'));
+  await kirora.flush();
+  await kirora.flush();
+  await vi.waitFor(() =>
+    expect(localStorage.getItem('kirora:events:kirora_pk_a@api.kirora.io')).toContain(
+      '"owner":null',
+    ),
+  );
+  await kirora.identify(tokenFor('bob'));
+  await kirora.flush();
+  expect(sent).toEqual([['bob', 'Pricing Viewed']]);
+  kirora.destroy();
+});

@@ -244,17 +244,18 @@ it('retries events refused for a passing reason, or answered twice, and drops th
   expect(Object.keys(answers[1]!)).toEqual(['Limited', 'Failed', 'Twice']);
 });
 
-it('keeps an event too large for keepalive while the page is hidden', async () => {
+it('keeps an event too large for keepalive while hidden, sending those behind it', async () => {
   const sent = recordEvents();
   const page = stubPage('https://example.com/', 'hidden');
   const kirora = client();
   kirora.track('Document Saved', { text: 'x'.repeat(70_000) });
+  kirora.track('Invoice Paid');
   await kirora.identify(tokenFor('ada'));
   await kirora.flush();
-  expect(sent).toEqual([]);
+  expect(sent.map((event) => event.name)).toEqual(['Invoice Paid']);
 
   page.visibilityState = 'visible';
   await kirora.flush();
-  expect(sent.map((event) => event.name)).toEqual(['Document Saved']);
+  expect(sent.map((event) => event.name)).toEqual(['Invoice Paid', 'Document Saved']);
   kirora.destroy();
 });
