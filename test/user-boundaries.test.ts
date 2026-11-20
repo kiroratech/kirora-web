@@ -311,6 +311,49 @@ it('gives a logout five seconds when Kirora never answers, then forgets the user
   }
 });
 
+it("doesn't keep the same user, signing in again, waiting on their old sign-in's send", async () => {
+  vi.useFakeTimers();
+  try {
+    let hanging = true;
+    const sent = recordRequests(() => undefined);
+    const recorded = fetch;
+    // As a real fetch does, a hung call ends when it's aborted.
+    vi.stubGlobal('fetch', (url: string, init: RequestInit) =>
+      hanging
+        ? new Promise<Response>((_, reject) =>
+            init.signal?.addEventListener('abort', () =>
+              reject(new DOMException('Aborted', 'AbortError')),
+            ),
+          )
+        : recorded(url, init),
+    );
+    const kirora = new Kirora({
+      clientKey: 'kirora_pk_a',
+      trackSessions: false,
+      logLevel: 'none',
+    });
+    await kirora.identify(tokenFor('alice'));
+    kirora.track('Invoice Paid');
+    const loggedOut = kirora.logout();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await loggedOut;
+
+    hanging = false;
+    await kirora.identify(tokenFor('alice'));
+    kirora.track('Pricing Viewed');
+    let flushed = false;
+    void kirora.flush().then(() => (flushed = true));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(flushed).toBe(true);
+    expect(sent.map((request) => [request.user, eventNames(request)])).toEqual([
+      ['alice', ['Pricing Viewed']],
+    ]);
+    kirora.destroy();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('abandons a sign-in still waiting for its token when a logout gives up waiting', async () => {
   vi.useFakeTimers();
   try {

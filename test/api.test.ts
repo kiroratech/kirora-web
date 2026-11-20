@@ -80,4 +80,6 @@ it.skipIf(!apiUrl || !clientKey || !tokenSecret)(
       globalThis.fetch = realFetch;
     }
   },
+  // A real network, and a staging server that may be starting up.
+  30_000,
 );

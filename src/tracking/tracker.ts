@@ -24,7 +24,7 @@ import {
 
 /** Only what the tracker uses of each part, so it depends on no more. */
 type TrackerDependencies = {
-  identity: Pick<Identity, 'user'>;
+  identity: Pick<Identity, 'owner'>;
   queue: Pick<EventQueue, 'add' | 'clearAll'>;
   delivery: Pick<EventDelivery, 'onEventQueued'>;
   consent: Pick<TrackingConsent, 'allowed'>;
@@ -93,9 +93,9 @@ export class Tracker {
     return { storage: this.parts.siteStorage, key: this.parts.sessionKey };
   }
 
-  /** The user signed in now, who owns what's tracked now. */
+  /** Who owns what's tracked now: no one while logout() signs the user out. */
   private owner(): EventOwner {
-    return this.parts.identity.user?.subject ?? null;
+    return this.parts.identity.owner?.subject ?? null;
   }
 
   /** The page is only looked at once consent allows it. */

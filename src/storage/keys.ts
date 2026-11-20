@@ -2,8 +2,8 @@
  * Every name the SDK stores under, in `localStorage` and (as `kirora_…`) in cookies. The
  * README's "What the SDK stores" lists the same; keep the two in step.
  *
- * `namespace` is the workspace and API deployment (`<client key>@<api host>`), so two
- * clients on one site never share a queue, session, device id or choice.
+ * `namespace` is the workspace and API deployment (`<client key>@<api host and path>`), so
+ * two clients on one site never share a queue, session, device id or choice.
  */
 export const STORAGE_KEYS = {
   /** Events waiting to be sent. */
@@ -18,6 +18,8 @@ export const STORAGE_KEYS = {
   installationId: (namespace: string) => `kirora:installation-id:${namespace}`,
   /** The visitor's tracking consent answer. */
   trackingConsent: (namespace: string) => `kirora:tracking-consent:${namespace}`,
+  /** A second copy of a refusal, so a value lost or garbled in one key can't lose it. */
+  trackingRefused: (namespace: string) => `kirora:tracking-refused:${namespace}`,
   /** Written and removed straight away, to check `localStorage` works. */
   probe: 'kirora:probe',
 } as const;

@@ -7,6 +7,7 @@ import {
   tokenFor,
   type SentRequest,
   pushClient,
+  sentEvents,
 } from './fake-kirora.js';
 import { stubIndexedDB } from './fake-indexeddb.js';
 
@@ -95,8 +96,8 @@ it('leaves nothing registered when logging out during a registration', async () 
 });
 
 it("keeps the next user registered when they sign in during a logout's sending", async () => {
-  // Bob's registration took the browser over first, so there's nothing of Alice's left
-  // to detach, and Bob's subscription is left alone.
+  // Alice's detachment doesn't wait for logout's sending, so it goes before Bob's
+  // registration, which is the one kept, and Bob's subscription is left alone.
   stubLocalStorage();
   stubWebPush();
   let holding = false;
@@ -113,7 +114,7 @@ it("keeps the next user registered when they sign in during a logout's sending",
   server.release();
   await loggedOut;
 
-  expect(deviceChanges(server.handled)).toEqual(['alice', 'bob']);
+  expect(deviceChanges(server.handled)).toEqual(['alice', '-alice', 'bob']);
   expect(savedRegistration()).toBe('bob');
   await kirora.setPushConsent(true);
   expect(server.requests.at(-1)).toMatchObject({ path: '/push-consent', user: 'bob' });
@@ -259,7 +260,8 @@ it('gives up on a service worker that never finishes installing', async () => {
     await vi.advanceTimersByTimeAsync(30_000);
     await identified;
     await kirora.logout();
-    expect(deviceChanges(server.handled)).toEqual([]);
+    // Nothing on record, so it's detached unconditionally, in case Kirora has it.
+    expect(deviceChanges(server.handled)).toEqual(['-alice']);
   } finally {
     vi.useRealTimers();
   }
@@ -498,6 +500,8 @@ it('keeps the registered subscription for the service worker', async () => {
 
   expect(stores.get('subscriptions')?.get('https://example.com/')).toMatchObject({
     url: 'https://api.example.com/client/v1/push-subscription-change',
+    // Trailing slash dropped, as tracking URLs are matched under it.
+    apiUrl: 'https://api.example.com',
     clientKey: 'kirora_pk_a',
     sdk: expect.stringMatching(/^kirora-web\//) as unknown,
     vapidPublicKey: PUSH_APP_KEY,
@@ -517,4 +521,154 @@ it('registers all the same where IndexedDB is refused', async () => {
   await pushClient().identify(tokenFor('alice'));
   expect(deviceChanges(server.handled)).toEqual(['alice']);
   expect(savedRegistration()).toBe('alice');
+});
+
+it('detaches the browser at logout even while its last events never get an answer', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora((request) => request.path === '/events/batch');
+  vi.useFakeTimers();
+  try {
+    const kirora = pushClient();
+    await kirora.identify(tokenFor('alice'));
+    kirora.track('Invoice Paid');
+    const loggedOut = kirora.logout();
+    // The hung send doesn't hold up the detachment.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(deviceChanges(server.handled)).toEqual(['alice', '-alice']);
+    await vi.advanceTimersByTimeAsync(4_900);
+    await loggedOut;
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('gives events tracked during logout() to whoever signs in next', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  let holding = true;
+  const server = fakeKirora((request) => holding && request.path === '/events/batch');
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  kirora.track('Invoice Paid');
+  const loggedOut = kirora.logout();
+  await vi.waitFor(() => expect(server.held).toHaveLength(1));
+  kirora.track('Pricing Viewed');
+  holding = false;
+  server.release();
+  await loggedOut;
+
+  await kirora.identify(tokenFor('bob'));
+  await kirora.flush();
+  const sentAs = sentEvents(server.handled).map(({ user, name }) => `${user}: ${name}`);
+  expect(sentAs).toEqual(['alice: Invoice Paid', 'bob: Pricing Viewed']);
+  kirora.destroy();
+});
+
+it("doesn't break the page in a sandboxed frame, where the service worker can't be read", () => {
+  stubLocalStorage();
+  stubWebPush();
+  vi.stubGlobal('document', {
+    visibilityState: 'visible',
+    title: '',
+    referrer: '',
+    cookie: '',
+    querySelector: () => null,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  });
+  vi.stubGlobal('addEventListener', () => undefined);
+  vi.stubGlobal('removeEventListener', () => undefined);
+  const sandboxed = {};
+  Object.defineProperty(sandboxed, 'serviceWorker', {
+    enumerable: true,
+    get: () => {
+      throw new DOMException('Sandboxed', 'SecurityError');
+    },
+  });
+  vi.stubGlobal('navigator', sandboxed);
+  expect(() => pushClient().destroy()).not.toThrow();
+});
+
+it('leaves the subscription alone when detaching fails with no registration on record', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora((request) => request.method === 'DELETE');
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  // Its record lost, the subscription may be the site's own, not Kirora's.
+  localStorage.removeItem(REGISTRATION_KEY);
+
+  vi.useFakeTimers();
+  try {
+    const loggedOut = kirora.logout();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await loggedOut;
+  } finally {
+    vi.useRealTimers();
+  }
+
+  // Detached all the same, but never unsubscribed.
+  expect(deviceChanges(server.requests)).toEqual(['alice', '-alice']);
+  expect(await browserSubscription()).not.toBeNull();
+  kirora.destroy();
+});
+
+it('saves the API address for the worker as Kirora writes its own', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const stores = stubIndexedDB();
+  fakeKirora();
+  await pushClient({ apiUrl: 'https://API.Example.com:443/' }).identify(
+    tokenFor('alice'),
+  );
+  expect(stores.get('subscriptions')?.get('https://example.com/')).toMatchObject({
+    apiUrl: 'https://api.example.com',
+  });
+});
+
+it('turns push off without cancelling a subscription Kirora has no record of', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  // Its record lost, the subscription may be the site's own, not Kirora's.
+  localStorage.removeItem(REGISTRATION_KEY);
+  await kirora.setPushEnabled(false);
+  expect(await browserSubscription()).not.toBeNull();
+  kirora.destroy();
+});
+
+it('says push is unsupported in a frame with no origin, as a sandboxed one has', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  vi.stubGlobal('origin', 'null');
+  const kirora = pushClient();
+  expect(await kirora.getPushStatus()).toBe('unsupported');
+  kirora.destroy();
+});
+
+it('cancels the subscription at once when a detachment is out of time already', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  // The detachment is never answered.
+  fakeKirora((request) => request.method === 'DELETE');
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  const internals = kirora as unknown as {
+    identity: { user: unknown };
+    push: { detach(user: unknown, deadline: number): Promise<void> };
+  };
+  vi.useFakeTimers();
+  try {
+    // As logout() does when waiting for a sign-in used up its time.
+    const detached = internals.push.detach(internals.identity.user, Date.now() - 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await detached;
+  } finally {
+    vi.useRealTimers();
+  }
+  expect(await browserSubscription()).toBeNull();
+  kirora.destroy();
 });

@@ -8,6 +8,16 @@ export class KiroraError extends Error {
   }
 }
 
+/**
+ * @internal What a public method rejects with: the SDK's own errors as they are, anything
+ * else as a `KiroraError` caused by it, its message after `prefix`.
+ */
+export function asKiroraError(error: unknown, prefix = ''): KiroraError {
+  if (error instanceof KiroraError) return error;
+  const reason = error instanceof Error ? error.message : String(error);
+  return new KiroraError(prefix + reason, { cause: error });
+}
+
 /** The app's `fetchUserToken` failed or didn't answer. Queued events are retried later. */
 export class UserTokenError extends KiroraError {
   constructor(cause: unknown) {
@@ -35,3 +45,9 @@ export class KiroraApiError extends KiroraError {
     return [408, 425, 429].includes(this.status) || this.status >= 500;
   }
 }
+
+/** @internal What a refusal says was wrong in the request, by part and dotted field. */
+export type FieldError = { in?: unknown; field?: unknown };
+
+/** @internal The `errors` of each refusal that lists any. Not part of the public error. */
+export const fieldErrors = new WeakMap<KiroraApiError, FieldError[]>();

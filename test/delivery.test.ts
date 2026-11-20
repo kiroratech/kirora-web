@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { Kirora } from '../src/index.js';
-import { accepted, stubLocalStorage, tokenFor } from './fake-kirora.js';
+import { accepted, kiroraRefusing, stubLocalStorage, tokenFor } from './fake-kirora.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -26,12 +26,29 @@ function kiroraAnswering(answer: (batch: SentBatch) => Response | Promise<Respon
 
 const names = (batch: SentBatch) => batch.events.map((event) => event.name);
 
+/** Kirora refusing `batch` for the first event with a note, naming its field. */
+function refusingNote(batch: SentBatch, status = 400): Response {
+  const index = batch.events.findIndex((event) => event.properties.note);
+  return Response.json(
+    {
+      error: {
+        code: 'VALIDATION_ERROR',
+        errors: [{ in: 'body', field: `events.${index}.properties.note` }],
+      },
+    },
+    { status },
+  );
+}
+
 it('drops a batch Kirora refuses as it is, so the events behind it still go', async () => {
   let refused = false;
   const { kirora, batches } = kiroraAnswering((batch) => {
     if (refused) return accepted(batch);
     refused = true;
-    return Response.json({ error: { code: 'forbidden' } }, { status: 403 });
+    return Response.json(
+      { error: { code: 'PLAN_FEATURE_UNAVAILABLE' } },
+      { status: 403 },
+    );
   });
   for (let index = 0; index < 101; index++) kirora.track(`Event ${index}`);
 
@@ -44,21 +61,79 @@ it('drops a batch Kirora refuses as it is, so the events behind it still go', as
   expect(batches).toHaveLength(2);
 });
 
-it('sends an invalid batch in halves, dropping only the event to blame', async () => {
-  const { kirora, batches } = kiroraAnswering((batch) =>
-    batch.events.some((event) => event.properties.note)
-      ? Response.json({ error: { code: 'invalid_request' } }, { status: 400 })
-      : accepted(batch),
-  );
-  kirora.track('Plan Compared');
-  kirora.track('Note Saved', { note: 'invalid' });
-  kirora.track('Invoice Paid');
+it.each([403, 404, 409])(
+  'keeps the events when something other than Kirora answers %i, and retries later',
+  async (status) => {
+    let answer = status;
+    const { kirora, batches } = kiroraAnswering((batch) =>
+      answer === 200 ? accepted(batch) : new Response('Not here', { status: answer }),
+    );
+    kirora.track('Plan Upgraded');
+    kirora.track('Invoice Paid');
 
-  await kirora.identify('token-for-ada');
-  await kirora.flush();
-  const delivered = batches.filter((batch) => !names(batch).includes('Note Saved'));
-  expect(delivered.flatMap(names)).toEqual(['Plan Compared', 'Invoice Paid']);
-});
+    await kirora.identify('token-for-ada');
+    await vi.waitFor(() => expect(batches).toHaveLength(1));
+    // Backing off: nothing goes until the delay has passed, or the app flushes.
+    kirora.track('Report Exported');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(batches).toHaveLength(1);
+
+    answer = 200;
+    await kirora.flush();
+    expect(batches.at(-1)!.events.map((event) => event.name)).toEqual([
+      'Plan Upgraded',
+      'Invoice Paid',
+      'Report Exported',
+    ]);
+  },
+);
+
+it.each([400, 422])(
+  'sends a batch refused %i in halves, dropping only the event named',
+  async (status) => {
+    const { kirora, batches } = kiroraAnswering((batch) =>
+      batch.events.some((event) => event.properties.note)
+        ? refusingNote(batch, status)
+        : accepted(batch),
+    );
+    kirora.track('Plan Compared');
+    kirora.track('Note Saved', { note: 'invalid' });
+    kirora.track('Invoice Paid');
+
+    await kirora.identify('token-for-ada');
+    await kirora.flush();
+    const delivered = batches.filter((batch) => !names(batch).includes('Note Saved'));
+    expect(delivered.flatMap(names)).toEqual(['Plan Compared', 'Invoice Paid']);
+  },
+);
+
+it.each([
+  ['no errors', { code: 'VALIDATION_ERROR' }],
+  [
+    'a header',
+    { code: 'VALIDATION_ERROR', errors: [{ in: 'headers', field: 'kirora-sdk' }] },
+  ],
+  ['a query', { code: 'VALIDATION_ERROR', errors: [{ in: 'query', field: 'x' }] }],
+])(
+  'keeps the events for a 400 naming %s, a problem with the request',
+  async (_, error) => {
+    let answer = 400;
+    const { kirora, batches } = kiroraAnswering((batch) =>
+      answer === 200 ? accepted(batch) : Response.json({ error }, { status: answer }),
+    );
+    kirora.track('Plan Compared');
+    kirora.track('Invoice Paid');
+    await kirora.identify('token-for-ada');
+    await vi.waitFor(() => expect(batches).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Not split: the whole batch waits for a retry.
+    expect(batches).toHaveLength(1);
+
+    answer = 200;
+    await kirora.flush();
+    expect(names(batches.at(-1)!)).toEqual(['Plan Compared', 'Invoice Paid']);
+  },
+);
 
 it('never queues an event without a name, or whose properties are not an object', async () => {
   const { kirora, batches } = kiroraAnswering((batch) => accepted(batch));
@@ -111,7 +186,7 @@ it('skips our own backoff for a flush() that joins a send already queued by a ti
 it('goes back to full batches once a split has found the event to blame', async () => {
   const { kirora, batches } = kiroraAnswering((batch) =>
     batch.events.some((event) => event.properties.note)
-      ? new Response(null, { status: 400 })
+      ? refusingNote(batch)
       : accepted(batch),
   );
   kirora.track('Note Saved', { note: 'invalid' });
@@ -341,4 +416,97 @@ it.each([408, 425])('keeps a batch answered %i, to retry it', async (status) => 
   await kirora.flush();
   await kirora.flush();
   expect(batches.map(names)).toEqual([['Invoice Paid'], ['Invoice Paid']]);
+});
+
+it('sends an event once when the same user is identified again while it is on its way', async () => {
+  let answerFirst: () => void = () => undefined;
+  const { kirora, batches } = kiroraAnswering(async (batch) => {
+    if (batches.length === 1)
+      await new Promise<void>((resolve) => (answerFirst = resolve));
+    return accepted(batch);
+  });
+  await kirora.identify(tokenFor('ada'));
+  kirora.track('Pricing Viewed');
+  const first = kirora.flush();
+  await vi.waitFor(() => expect(batches).toHaveLength(1));
+
+  // As React's StrictMode, or the next page load's identify(), does.
+  await kirora.identify(tokenFor('ada', 'fresh'));
+  kirora.track('Plan Compared');
+  const second = kirora.flush();
+  answerFirst();
+  await Promise.all([first, second]);
+  expect(batches.map(names)).toEqual([['Pricing Viewed'], ['Plan Compared']]);
+  kirora.destroy();
+});
+
+it('sends nothing more after a refused token it cannot replace, until identify()', async () => {
+  const tokens = kiroraRefusing((token) => token === 'expired-token');
+  const kirora = new Kirora({
+    clientKey: 'kirora_pk_test',
+    trackSessions: false,
+    logLevel: 'none',
+  });
+  kirora.track('Plan Upgraded');
+  await kirora.identify('expired-token');
+  await kirora.flush();
+  expect(tokens).toEqual(['expired-token']);
+
+  // Neither the timer, a full queue nor a flush asks Kirora again with the same token.
+  for (let index = 0; index < 25; index++) kirora.track(`Event ${index}`);
+  await kirora.flush();
+  expect(tokens).toHaveLength(1);
+
+  // Nor does any other call: it's refused at once.
+  await expect(kirora.setPushConsent(true)).rejects.toMatchObject({ status: 401 });
+  expect(tokens).toHaveLength(1);
+
+  await kirora.identify('fresh-token');
+  await kirora.flush();
+  expect(tokens.at(-1)).toBe('fresh-token');
+});
+
+it('sends at once as the page is hidden, without waiting for a lock granted too late', async () => {
+  const { kirora, batches } = kiroraAnswering((batch) => accepted(batch));
+  await kirora.identify('token-for-ada');
+  await kirora.flush();
+  // As the page goes away, a lock is only granted on a later task: by then it's gone.
+  vi.stubGlobal('navigator', {
+    locks: {
+      request: (_name: string, callback: () => Promise<unknown>) =>
+        new Promise((resolve) => setTimeout(() => resolve(callback()))),
+    },
+  });
+  vi.stubGlobal('document', { visibilityState: 'hidden' });
+  kirora.track('Checkout Left');
+  void kirora.flush();
+  // Microtasks only, as before the page is torn down.
+  for (let index = 0; index < 20; index++) await Promise.resolve();
+  expect(batches.flatMap(names)).toEqual(['Checkout Left']);
+  kirora.destroy();
+});
+
+it("doesn't wait for a send on its way as the page is hidden, nor send its events twice", async () => {
+  let answerFirst: () => void = () => undefined;
+  const { kirora, batches } = kiroraAnswering((batch) =>
+    batches.length === 1
+      ? new Promise<Response>((resolve) => (answerFirst = () => resolve(accepted(batch))))
+      : accepted(batch),
+  );
+  kirora.track('Plan Compared');
+  await kirora.identify('token-for-ada');
+  void kirora.flush();
+  await vi.waitFor(() => expect(batches).toHaveLength(1));
+
+  // The page hides while that send waits for its answer, which would come too late.
+  vi.stubGlobal('document', { visibilityState: 'hidden' });
+  kirora.track('Checkout Left');
+  void kirora.flush();
+  for (let index = 0; index < 20; index++) await Promise.resolve();
+  expect(batches.map(names)).toEqual([['Plan Compared'], ['Checkout Left']]);
+
+  answerFirst();
+  await kirora.flush();
+  expect(batches.map(names)).toEqual([['Plan Compared'], ['Checkout Left']]);
+  kirora.destroy();
 });

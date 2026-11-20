@@ -30,6 +30,7 @@ let sent: { url: string; headers: Record<string, string>; body: unknown }[];
 
 const saved: SavedSubscription = {
   url: URL,
+  apiUrl: 'https://api.example.com',
   clientKey: 'kirora_pk_a',
   sdk: 'kirora-web/1.0.0',
   pushAppId: 'app_web',

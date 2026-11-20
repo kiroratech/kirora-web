@@ -1,6 +1,6 @@
 import type { ClientApi } from '../api/client-api.js';
 import type { Identity, SignedInUser } from '../identity/identity.js';
-import { KiroraApiError, UserTokenError } from '../errors.js';
+import { fieldErrors, KiroraApiError, UserTokenError } from '../errors.js';
 import type { TrackingConsent } from '../tracking/consent.js';
 import type { EventQueue, QueuedEvent } from './event-queue.js';
 import type { Log } from '../utils/log.js';
@@ -18,8 +18,12 @@ const ENVELOPE_BYTES = 64;
 const FLUSH_AT_EVENTS = 20;
 const FLUSH_INTERVAL_MS = 30_000;
 const MAX_RETRY_DELAY_MS = 5 * 60_000;
-/** Answers that blame something in the batch: halving it finds the event to drop. */
-const SPLIT_STATUSES = [400, 413, 422];
+/**
+ * Kirora's one refusal of a whole batch that holds for good: the plan lacks the feature.
+ * Any other 4xx (a 403, 404 or 409, say) never comes from `/events/batch` itself but from
+ * a wrong `apiUrl`, a proxy or a captive portal, so the events are kept and retried.
+ */
+const TERMINAL_CODES = ['PLAN_FEATURE_UNAVAILABLE'];
 /** Per-event refusals that a later attempt may not get: the event is kept and retried. */
 const RETRYABLE_EVENT_CODES = ['RATE_LIMITED', 'INTERNAL_ERROR', 'SERVICE_UNAVAILABLE'];
 /** Retry delays vary by this fraction, so clients don't all retry at once. */
@@ -49,10 +53,16 @@ export class EventDelivery {
   private delayFromServer = false;
   private destroyed = false;
   /**
-   * Cancels the batches being sent, e.g. as consent is withdrawn: one for the user
-   * signed in now, and one still under way for a user who has since signed out.
+   * The batches being sent, by the user each is for, to cancel them: all as consent is
+   * withdrawn, or an earlier sign-in's as the same user signs in again. One may be for
+   * the user signed in now, and one for a user who has since signed out.
    */
-  private readonly sending = new Set<AbortController>();
+  private readonly sending = new Map<AbortController, SignedInUser>();
+  /**
+   * The idempotency keys of the events on their way, which another send skips: while the
+   * page is hidden, sends don't wait for each other.
+   */
+  private readonly inFlight = new Set<string>();
   /**
    * The events the latest sign-in adopted, until Kirora accepts a batch as that user. A
    * token refused before then means the sign-in failed, so they're given back.
@@ -79,7 +89,7 @@ export class EventDelivery {
    */
   cancel(): void {
     this.stop();
-    for (const sending of this.sending) sending.abort();
+    for (const sending of this.sending.keys()) sending.abort();
   }
 
   /**
@@ -115,8 +125,15 @@ export class EventDelivery {
   private flushWhenDue(): Promise<void> {
     // The running send may have read the queue before the latest events were added. One
     // for a user no longer signed in is left to itself instead, so the next user's events
-    // don't wait on an answer for it, e.g. after a logout gave up waiting for one.
-    if (this.flushing && this.sendingAs === this.identity.user) {
+    // don't wait on an answer for it, e.g. after a logout gave up waiting for one. The
+    // same user identified again waits, or both sends would read the same events, but
+    // their old send is cancelled first, so the wait is short. While the page is hidden
+    // nothing waits, as the answer would come after the page has gone: the new send
+    // skips the events already on their way.
+    const { user } = this.identity;
+    const sendingAs = this.sendingAs;
+    if (this.flushing && sendingAs?.subject === user?.subject && !isPageHidden()) {
+      if (sendingAs !== user) this.abortSendsFor(sendingAs!);
       const runNext = () => {
         this.nextFlush = null;
         return this.flushWhenDue();
@@ -131,6 +148,13 @@ export class EventDelivery {
     return sending;
   }
 
+  /** Cancels the batches on their way for `user`, signed in before. Kept for a retry. */
+  private abortSendsFor(user: SignedInUser): void {
+    for (const [sending, sendingAs] of this.sending) {
+      if (sendingAs === user) sending.abort();
+    }
+  }
+
   private stop(): void {
     clearTimeout(this.timer);
     this.timer = undefined;
@@ -142,30 +166,45 @@ export class EventDelivery {
     const skipBackoff = this.backoffWaived;
     this.backoffWaived = false;
     if (this.destroyed) return;
+    // Bound to the user signed in now. If the app changes user, the next identify()
+    // flushes for them. A token refused for good would be refused again: nothing goes
+    // until identify() signs in again.
+    const { user } = this.identity;
+    if (!user || this.identity.tokenRefused(user)) return;
     if (this.mustWait(skipBackoff)) {
       this.schedule(this.notBefore);
       return;
     }
-    // Bound to the user signed in now. If the app changes user, the next identify()
-    // flushes for them.
-    const { user } = this.identity;
-    if (!user) return;
     this.sendingAs = user;
     let maxEvents = EVENT_BATCH_SIZE;
     const mayStillSend = () =>
       this.identity.user === user && !this.destroyed && this.consent.allowed;
     while (mayStillSend()) {
       const hidden = isPageHidden();
-      const batch = fitBatch(await this.queue.oldest(maxEvents, user.subject), hidden);
+      // Read at once while hidden: the page may be going away.
+      const batch = fitBatch(
+        (await this.queue.oldest(maxEvents, user.subject, hidden)).filter(
+          (event) => !this.inFlight.has(event.idempotencyKey),
+        ),
+        hidden,
+      );
       // Consent may have been withdrawn, or the user changed, while the queue was read.
       if (batch.length === 0 || !mayStillSend()) return;
-      const outcome = await this.sendBatch(user, batch, hidden);
+      const keys = batch.map((event) => event.idempotencyKey);
+      for (const key of keys) this.inFlight.add(key);
+      let outcome: Awaited<ReturnType<EventDelivery['sendBatch']>>;
+      try {
+        outcome = await this.sendBatch(user, batch, hidden);
+        // Still on their way until removed, so another send can't pick them up again.
+        if (outcome instanceof Set) await this.queue.remove(outcome);
+      } finally {
+        for (const key of keys) this.inFlight.delete(key);
+      }
       if (outcome === 'split') {
         maxEvents = Math.ceil(batch.length / 2);
         continue;
       }
       if (outcome === 'stop') return;
-      await this.queue.remove(outcome);
       // Past the event a split isolated, the rest go in full batches again.
       maxEvents = EVENT_BATCH_SIZE;
       if (outcome.size < batch.length) {
@@ -188,7 +227,7 @@ export class EventDelivery {
   ): Promise<Set<string> | 'split' | 'stop'> {
     const batchKeys = new Set(batch.map((event) => event.idempotencyKey));
     const sending = new AbortController();
-    this.sending.add(sending);
+    this.sending.set(sending, user);
     try {
       const sent = await this.api.request<unknown>('POST', '/events/batch', {
         // Lets the server correct for clock skew.
@@ -219,29 +258,41 @@ export class EventDelivery {
   ): Set<string> | 'split' | 'stop' {
     if (!(error instanceof KiroraApiError) || error.retryable) {
       // Offline, timed out, 429/5xx, or the token fetch failed: keep them, retry later.
-      if (error instanceof UserTokenError) this.log('error', error.message, error.cause);
+      if (error instanceof UserTokenError) {
+        this.log('error', error.message, error.cause);
+        this.identity.authFailed(user, 'fetch_failed');
+      }
       this.retryLater(user, error);
       return 'stop';
     }
     // Still refused after a token refresh, or the user changed: the events wait for the
     // next identify() as their own user, and those this sign-in adopted are given back.
     // Retried with backoff only if a fresh token can be asked for: a token passed to
-    // identify() would be refused every time.
+    // identify() would be refused every time, which Identity remembers.
     if (error.status === 401) {
       this.log('error', 'Events not sent', error);
       this.giveBackAdopted(user);
-      if (this.identity.canRefresh) this.retryLater(user);
+      this.identity.authFailed(user, 'refused');
+      if (!this.identity.tokenRefused(user)) this.retryLater(user);
       return 'stop';
     }
     // Too large or invalid: retry in halves until we isolate the bad event, so the rest of
     // the batch still goes.
-    if (SPLIT_STATUSES.includes(error.status) && batchKeys.size > 1) return 'split';
-    // Any other 4xx will fail every time, so drop the batch instead of blocking the queue.
-    this.log('error', `${batchKeys.size} events dropped: Kirora refused them`, {
-      status: error.status,
+    const blamesEvents = blamesAnEvent(error);
+    if (blamesEvents && batchKeys.size > 1) return 'split';
+    if (blamesEvents || TERMINAL_CODES.includes(error.code ?? '')) {
+      this.log('error', `${batchKeys.size} events dropped: Kirora refused them`, {
+        status: error.status,
+        code: error.code,
+      });
+      return batchKeys;
+    }
+    // Not Kirora's answer to the batch: keep the events, as for a network failure.
+    this.log('error', `Events not sent: answered ${error.status}; retrying later`, {
       code: error.code,
     });
-    return batchKeys;
+    this.retryLater(user, error);
+    return 'stop';
   }
 
   /** A sign-in whose token Kirora never accepted gives back the events it adopted. */
@@ -353,6 +404,24 @@ function fitBatch(events: QueuedEvent[], hidden: boolean): QueuedEvent[] {
     bytes += size;
   }
   return batch;
+}
+
+/**
+ * Whether Kirora's refusal of a batch blames events in it, so halving it finds the event
+ * to drop. A 413 or 422 does; a 400 only if its `errors` name a field under `events`.
+ * Otherwise it's a problem with the request (a header, say), so the events are kept.
+ */
+function blamesAnEvent(error: KiroraApiError): boolean {
+  if (error.status === 413 || error.status === 422) return true;
+  return (
+    error.status === 400 &&
+    (fieldErrors.get(error) ?? []).some(
+      (fieldError) =>
+        fieldError?.in === 'body' &&
+        typeof fieldError.field === 'string' &&
+        /^events(\.|$)/.test(fieldError.field),
+    )
+  );
 }
 
 /** One event's answer in `POST /events/batch`, as far as it can be trusted. */

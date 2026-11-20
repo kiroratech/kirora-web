@@ -1,8 +1,9 @@
 import { ClientApi } from './api/client-api.js';
-import { KiroraApiError, KiroraError, UserTokenError } from './errors.js';
+import { asKiroraError, KiroraApiError, KiroraError, UserTokenError } from './errors.js';
 import { EventDelivery } from './events/event-delivery.js';
 import { EventQueue } from './events/event-queue.js';
 import { Identity, isUnnamedSubject } from './identity/identity.js';
+import { NotificationTaps } from './push/notification-taps.js';
 import { WebPush } from './push/web-push.js';
 import { deviceStorage, type KeyValueStorage } from './storage/device-storage.js';
 import { STORAGE_KEYS } from './storage/keys.js';
@@ -16,6 +17,7 @@ import { Tracker } from './tracking/tracker.js';
 import type {
   EventProperties,
   KiroraOptions,
+  NotificationClickListener,
   PushPermission,
   PushStatus,
 } from './types.js';
@@ -43,6 +45,7 @@ export class Kirora {
   private readonly consent: TrackingConsent;
   private readonly tracker: Tracker;
   private readonly push: WebPush;
+  private readonly taps: NotificationTaps;
   /** Where `device.id` is kept, per workspace. */
   private readonly installationIdKey: string;
   private destroyed = false;
@@ -59,7 +62,19 @@ export class Kirora {
     ) {
       this.log('error', 'clientKey should be your client key, kirora_pk_…');
     }
-    this.identity = new Identity(options.fetchUserToken);
+    const { onAuthenticationFailed } = options;
+    this.identity = new Identity(
+      options.fetchUserToken,
+      typeof onAuthenticationFailed === 'function'
+        ? (reason) => {
+            try {
+              onAuthenticationFailed(reason);
+            } catch (error) {
+              this.log('error', 'Error in onAuthenticationFailed', error);
+            }
+          }
+        : undefined,
+    );
     this.api = new ClientApi(options, this.identity);
     // Logged rather than thrown, so a bad setting can't break the page. Nothing is sent.
     if (this.api.urlProblem) this.log('error', this.api.urlProblem);
@@ -81,7 +96,8 @@ export class Kirora {
       options.requireTrackingConsent === true,
       this.log,
     );
-    if (!storage.readable) {
+    // Server rendering has no localStorage to read, and tracks nothing anyway.
+    if (!storage.readable && typeof document !== 'undefined') {
       this.log(
         'error',
         "Can't read localStorage, so a refusal saved there can't be seen: nothing is " +
@@ -117,12 +133,15 @@ export class Kirora {
       deviceId,
       this.log,
     );
+    this.taps = new NotificationTaps(this.log);
     // What's stored from before the visitor refused, e.g. before consent was required.
     if (this.consent.refused) this.forgetTracking();
     // Server rendering: nothing to watch, and nothing happens until identify().
     if (typeof document === 'undefined') return;
     // Loading the page counts as activity, so it can start a session.
     this.tracker.noteActivity();
+    const stopTaps = this.push.watchTaps(this.taps);
+    if (stopTaps) this.stopWatching.push(stopTaps);
     if (options.trackPageViews) {
       this.stopWatching.push(watchPageViews(() => this.trackPageView()));
     }
@@ -136,8 +155,11 @@ export class Kirora {
           onOnline: sendNow,
           // Returning is activity, and time on a visible page never ends a visit.
           // Also the time to send an event too large to go while the page was hidden.
+          // A token that expired while the tab was hidden, its timer held back, is
+          // replaced before anything is sent with it.
           onReturn: () => {
             this.tracker.noteActivity();
+            this.identity.refreshIfDue();
             sendNow();
           },
           whileVisible: () => this.tracker.keepSessionAlive(),
@@ -150,12 +172,21 @@ export class Kirora {
   /**
    * Sets the signed-in user and starts sending their queued events. Call it on every
    * page load where they're signed in. Without a token, it asks `fetchUserToken` for one.
-   * If identify() is called again before a token arrives, the latest call wins. Throws
-   * only for the token; push registration errors are logged.
+   * If identify() is called again before a token arrives, the latest call wins. Rejects
+   * with a `KiroraError`: `UserTokenError` when `fetchUserToken` fails, a 401
+   * `KiroraApiError` if Kirora refuses the token while registering this browser for push
+   * (refused only while sending events, it's `onAuthenticationFailed`'s: each refusal is
+   * reported once), and `KiroraError` itself with no token and no `fetchUserToken`, or an
+   * `apiUrl` that isn't an address. Other push registration errors are logged.
    */
   async identify(userToken?: string): Promise<void> {
     if (this.destroyed) return;
-    await this.identity.signIn(userTokenOf(userToken), () => this.onSignedIn());
+    if (this.api.urlProblem) throw new KiroraError(this.api.urlProblem);
+    try {
+      await this.identity.signIn(userTokenOf(userToken), () => this.onSignedIn());
+    } catch (error) {
+      throw asKiroraError(error);
+    }
   }
 
   /**
@@ -182,15 +213,20 @@ export class Kirora {
     // was signed in then. A sign-in started since is newer, so it stays.
     const user = signedInSince ? signedInBefore : this.identity.user;
     if (!user) return;
+    this.identity.signingOut(user);
     try {
-      if (!(await settledBy(this.delivery.flush(), deadline))) {
+      // Together, so a send that hangs can't leave the detachment no time. It carries on
+      // in the background if it fails.
+      const [sent] = await Promise.all([
+        settledBy(this.delivery.flush(), deadline),
+        settledBy(this.push.detach(user, deadline), deadline),
+      ]);
+      if (!sent) {
         this.log(
           'error',
           "Gave up waiting for Kirora; the user's unsent events are dropped",
         );
       }
-      // Carries on in the background if it fails or isn't done by the deadline.
-      await settledBy(this.push.detach(user, deadline), deadline);
       const signedOut = this.identity.signOut(user);
       // Anything left is this user's, so it never goes as the next one; but if they
       // signed in again meanwhile, it's theirs to send.
@@ -202,6 +238,9 @@ export class Kirora {
       if (this.consent.refused) this.forgetDeviceIdIfUnused();
     } catch (error) {
       this.log('error', 'Logout failed to clean up', error);
+    } finally {
+      // If cleanup failed before signing them out, they're still here: news again.
+      this.identity.signedOut(user);
     }
   }
 
@@ -234,7 +273,25 @@ export class Kirora {
     void this.delivery.flush();
   }
 
-  /** Shows the notification prompt. Call it from a click; browsers block it otherwise. */
+  /**
+   * Hears taps on Kirora pushes and their buttons, with the push's `data`, after each tap
+   * was reported. A tap reaches the page its link opened, or the tab it brought forward;
+   * one that arrived before any listener is held (the latest ten) and given to the first.
+   * Only pages on your own site hear taps.
+   */
+  addNotificationClickListener(listener: NotificationClickListener): void {
+    if (typeof listener === 'function') this.taps.add(listener);
+  }
+
+  removeNotificationClickListener(listener: NotificationClickListener): void {
+    this.taps.remove(listener);
+  }
+
+  /**
+   * Shows the notification prompt, then registers this browser if granted. Call it from a
+   * click; browsers block it otherwise. A failed registration is logged, and
+   * `getPushStatus()` says `disabled`.
+   */
   requestPushPermission(): Promise<PushPermission> {
     return this.push.requestPermission();
   }
@@ -264,10 +321,16 @@ export class Kirora {
     }
   }
 
-  /** Records consent to marketing pushes. Browser permission alone doesn't count. */
+  /**
+   * Records consent to marketing pushes. Browser permission alone doesn't count. Rejects
+   * with a `KiroraError` when Kirora hasn't recorded the choice: `KiroraApiError` for its
+   * refusal, `UserTokenError`, or `KiroraError` itself when nobody is signed in or Kirora
+   * couldn't be reached. Ask again later. After `destroy()` it does nothing.
+   */
   async setPushConsent(granted: boolean): Promise<void> {
     await this.identity.settled();
     if (this.destroyed) return;
+    // Rejects only with the SDK's own errors.
     await this.api.request('PUT', '/push-consent', { body: { granted } });
   }
 

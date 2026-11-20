@@ -1,11 +1,17 @@
 import { KiroraError, UserTokenError } from '../errors.js';
-import type { KiroraOptions } from '../types.js';
+import type { AuthenticationFailure, KiroraOptions } from '../types.js';
 import { base64UrlDecode } from '../utils/base64url.js';
 import { withTimeout } from '../utils/timeout.js';
 import { uuid } from '../utils/uuid.js';
 
 /** A `fetchUserToken` still unanswered after this counts as failed. */
 const TOKEN_TIMEOUT_MS = 30_000;
+/** A token is replaced this long before its `exp`, so no request carries an expired one. */
+const REFRESH_AHEAD_MS = 60_000;
+/** A failed early refresh is tried again after this, while the token still works. */
+const REFRESH_RETRY_MS = 15_000;
+/** setTimeout's longest delay; a longer wait checks again then. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * One signed-in user. A new object each time the user changes, so work started for a
@@ -15,6 +21,11 @@ const TOKEN_TIMEOUT_MS = 30_000;
 export type SignedInUser = {
   token: string;
   /**
+   * When `token` stops working, by this device's clock (epoch ms), set as it arrives;
+   * undefined if it can't be told. It's replaced a minute before.
+   */
+  expiresAt: number | undefined;
+  /**
    * Tells users apart, e.g. to own their queued events: the token's `sub`, unverified
    * (Kirora checks the signature). A token without one can't be told apart from another
    * user's, so it gets an id of its own, new for each sign-in.
@@ -22,6 +33,16 @@ export type SignedInUser = {
   readonly subject: string;
   /** The token's `sub`, or null. A refreshed token must have the same. */
   readonly tokenSubject: string | null;
+  /**
+   * How many logout() calls are signing this user out, as two may overlap: a failure on
+   * the way out isn't the app's to hear.
+   */
+  leaving?: number;
+  /**
+   * Kirora refused this user's token and there's no `fetchUserToken` to ask for another:
+   * every call as them would be refused too, until identify() signs in again.
+   */
+  refused?: true;
 };
 
 /**
@@ -30,7 +51,12 @@ export type SignedInUser = {
  * - The latest `signIn()` or `end()` wins, whatever order tokens arrive in. `signOut()`
  *   only signs out the user it names, so a newer sign-in still wins.
  * - Work started for one user never carries on as the next: it captures `user`.
- * - A refused token is refreshed once, shared by every call that was refused.
+ * - A refused token is refreshed once, shared by every call that was refused. Without
+ *   `fetchUserToken` it's refused for good: no call goes as that user again.
+ * - With `fetchUserToken`, a token is also refreshed a minute before it expires, and
+ *   retried until it has; only a failure after that is reported.
+ * - A token failing in the background is reported to the app once, until it's accepted
+ *   again or identify() is called.
  *
  * The token is kept in memory only.
  */
@@ -42,12 +68,32 @@ export class Identity {
   private signingIn: Promise<void> | undefined;
   /** Shared so concurrent refusals only trigger one refresh. */
   private pendingRefresh: Promise<string> | null = null;
-
-  constructor(private readonly fetchUserToken: KiroraOptions['fetchUserToken']) {}
+  /** Asks for a fresh token before the current one expires. */
+  private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The user whose token failure the app was told of, so it's told once. */
+  private failureReported: SignedInUser | null = null;
+  /**
+   * The user identify() is still signing in, and a token failure held back meanwhile:
+   * if identify() rejects for it, the app hears of it there, so it's reported once.
+   */
+  private identifying: { user: SignedInUser; held?: AuthenticationFailure } | null = null;
+  constructor(
+    private readonly fetchUserToken: KiroraOptions['fetchUserToken'],
+    private readonly onFailed?: (reason: AuthenticationFailure) => void,
+  ) {}
 
   /** The signed-in user, or null. */
   get user(): SignedInUser | null {
     return this.signedIn;
+  }
+
+  /**
+   * Who owns what's tracked now: the signed-in user, unless logout() is signing them out,
+   * when it's whoever signs in next.
+   */
+  get owner(): SignedInUser | null {
+    const user = this.signedIn;
+    return user && !user.leaving ? user : null;
   }
 
   /** Changes with every signIn() and end(), so a caller can tell if either happened since. */
@@ -69,7 +115,18 @@ export class Identity {
       const userToken = token ?? (await this.fetchToken());
       if (call !== this.calls) return;
       this.setUser(userToken);
-      await onSignedIn();
+      const identifying: NonNullable<Identity['identifying']> = { user: this.signedIn! };
+      this.identifying = identifying;
+      try {
+        await onSignedIn();
+      } catch (error) {
+        // identify() rejects for the token: that's the app's one report of it.
+        this.failureReported = identifying.user;
+        throw error;
+      } finally {
+        if (this.identifying === identifying) this.identifying = null;
+      }
+      if (identifying.held) this.authFailed(identifying.user, identifying.held);
     })());
   }
 
@@ -89,9 +146,85 @@ export class Identity {
     this.setUser(null);
   }
 
-  /** True if a refused token can be replaced, through `fetchUserToken`. */
-  get canRefresh(): boolean {
-    return this.fetchUserToken !== undefined;
+  /**
+   * Tells the app `user`'s token failed in the background, if they're still signed in and
+   * it hasn't been told since their token was last accepted or identify() was called.
+   */
+  authFailed(user: SignedInUser, reason: AuthenticationFailure): void {
+    if (this.owner !== user || this.failureReported === user) return;
+    if (this.identifying?.user === user) {
+      this.identifying.held ??= reason;
+      return;
+    }
+    this.failureReported = user;
+    // Apart from the SDK's own work, and only if it still stands then: another sign-in,
+    // logout(), destroy() or an accepted token may have come first.
+    setTimeout(() => {
+      if (this.owner === user && this.failureReported === user) this.onFailed?.(reason);
+    });
+  }
+
+  /**
+   * Waits for a token refresh under way for `user`, so a request doesn't go with the
+   * token it's about to replace (e.g. as the page is shown again). Never rejects.
+   */
+  async tokenReady(user: SignedInUser): Promise<void> {
+    if (this.signedIn === user) await this.pendingRefresh?.catch(() => undefined);
+  }
+
+  /** Kirora accepted `user`'s token: a later failure is news again. */
+  tokenAccepted(user: SignedInUser): void {
+    if (this.failureReported === user) this.failureReported = null;
+  }
+
+  /** logout() is signing `user` out: a failure on the way out isn't the app's to hear. */
+  signingOut(user: SignedInUser): void {
+    user.leaving = (user.leaving ?? 0) + 1;
+  }
+
+  /** A logout() of `user` is done: once none is left, their failures are news again. */
+  signedOut(user: SignedInUser): void {
+    user.leaving!--;
+  }
+
+  /**
+   * Asks for a fresh token if the current one expires within a minute. On a timer, and as
+   * the page is shown again, since browsers hold back timers in hidden tabs.
+   */
+  refreshIfDue(): void {
+    const user = this.signedIn;
+    if (!user || !this.fetchUserToken) return;
+    const { expiresAt } = user;
+    if (expiresAt === undefined) return;
+    if (Date.now() < expiresAt - REFRESH_AHEAD_MS) {
+      this.setTimer(expiresAt - REFRESH_AHEAD_MS);
+      return;
+    }
+    // A token for someone else is ignored: the current one goes until it's refused.
+    const { token } = user;
+    this.refresh(user, token).catch((error: unknown) => {
+      // Signed out, or another call got a token meanwhile.
+      if (
+        !(error instanceof UserTokenError) ||
+        this.signedIn !== user ||
+        user.token !== token
+      ) {
+        return;
+      }
+      // Tried again while the token works, last as it expires; the app hears only of a
+      // refresh that failed once it had.
+      const now = Date.now();
+      if (now < expiresAt) {
+        this.setTimer(Math.min(now + REFRESH_RETRY_MS, expiresAt));
+        return;
+      }
+      this.authFailed(user, 'fetch_failed');
+    });
+  }
+
+  /** True if Kirora refused `user`'s token and it can't be replaced. */
+  tokenRefused(user: SignedInUser): boolean {
+    return user.refused === true;
   }
 
   /** Lets a sign-in still waiting for its token set no one, keeping whoever is signed in. */
@@ -111,13 +244,20 @@ export class Identity {
    * refreshed.
    */
   async refresh(user: SignedInUser, refusedToken: string): Promise<string | null> {
-    if (this.user !== user || !this.fetchUserToken) return null;
+    if (!this.fetchUserToken) {
+      user.refused = true;
+      return null;
+    }
+    if (this.user !== user) return null;
     if (user.token !== refusedToken) return user.token;
     const refresh = (this.pendingRefresh ??= this.fetchToken());
     try {
       const userToken = await refresh;
       if (this.user !== user || subjectOf(userToken) !== user.tokenSubject) return null;
       user.token = userToken;
+      user.expiresAt = expiresAtOf(userToken, true);
+      // Sets the next refresh, a minute before it expires.
+      this.setTimer(0);
       return userToken;
     } finally {
       if (this.pendingRefresh === refresh) this.pendingRefresh = null;
@@ -127,6 +267,23 @@ export class Identity {
   private setUser(userToken: string | null): void {
     this.signedIn = userToken === null ? null : signedInUser(userToken);
     this.pendingRefresh = null;
+    clearTimeout(this.refreshTimer);
+    // Sets the first refresh, a minute before the token expires.
+    if (this.signedIn) this.setTimer(0);
+  }
+
+  /**
+   * Checks at `at` (epoch ms) whether the signed-in user's token is due, replacing the
+   * timer set before: a new user's sign-in replaces it too.
+   */
+  private setTimer(at: number): void {
+    clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(
+      () => this.refreshIfDue(),
+      Math.min(Math.max(at - Date.now(), 0), MAX_TIMER_MS),
+    );
+    // In Node, as when server rendering, a refresh timer mustn't keep the process alive.
+    (this.refreshTimer as unknown as { unref?: () => void }).unref?.();
   }
 
   private async fetchToken(): Promise<string> {
@@ -154,16 +311,50 @@ export function isUnnamedSubject(subject: string): boolean {
 
 function signedInUser(token: string): SignedInUser {
   const tokenSubject = subjectOf(token);
-  return { token, tokenSubject, subject: tokenSubject ?? `${UNNAMED_SUBJECT}${uuid()}` };
+  return {
+    token,
+    expiresAt: expiresAtOf(token, false),
+    tokenSubject,
+    subject: tokenSubject ?? `${UNNAMED_SUBJECT}${uuid()}`,
+  };
+}
+
+/** The token's claims, unverified (Kirora checks the signature), or none. */
+function claimsOf(userToken: string): { sub?: unknown; exp?: unknown; iat?: unknown } {
+  try {
+    const claims = userToken.split('.')[1];
+    if (!claims) return {};
+    const parsed = JSON.parse(base64UrlDecode(claims)) as unknown;
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function subjectOf(userToken: string): string | null {
-  try {
-    const claims = userToken.split('.')[1];
-    if (!claims) return null;
-    const { sub } = JSON.parse(base64UrlDecode(claims)) as { sub?: unknown };
-    return typeof sub === 'string' && sub !== '' ? sub : null;
-  } catch {
-    return null;
+  const { sub } = claimsOf(userToken);
+  return typeof sub === 'string' && sub !== '' ? sub : null;
+}
+
+/**
+ * When `userToken`, just arrived, stops working (epoch ms): at its `exp`. One already past
+ * it as it arrives meets a device clock that's ahead, so its lifetime (`exp` less `iat`)
+ * is counted from now instead. Undefined if that can't be told, or for one a refresh just
+ * gave that's due at once: asking again would get the same, so it's replaced once Kirora
+ * refuses it. Either way it waits for a refusal.
+ */
+function expiresAtOf(userToken: string, refreshed: boolean): number | undefined {
+  const { exp, iat } = claimsOf(userToken);
+  if (!isTime(exp)) return undefined;
+  const now = Date.now();
+  let expiresAt = exp * 1000;
+  if (expiresAt <= now) {
+    if (!isTime(iat)) return undefined;
+    expiresAt = now + (exp - iat) * 1000;
   }
+  return refreshed && expiresAt - REFRESH_AHEAD_MS <= now ? undefined : expiresAt;
+}
+
+function isTime(claim: unknown): claim is number {
+  return typeof claim === 'number' && Number.isFinite(claim);
 }

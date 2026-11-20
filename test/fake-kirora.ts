@@ -56,10 +56,29 @@ export function stubLocalStorage(full?: () => boolean): void {
   vi.stubGlobal('localStorage', memoryStorage(full));
 }
 
-/** A user token Kirora would accept, as far as the SDK can tell: a JWT naming `sub`. */
-export function tokenFor(sub: string, variant = ''): string {
-  const claims = btoa(JSON.stringify({ sub })).replace(/=+$/, '');
-  return `header.${claims}.signature${variant}`;
+/**
+ * A user token Kirora would accept, as far as the SDK can tell: a JWT naming `sub`, with
+ * any other `claims`.
+ */
+export function tokenFor(sub: string, variant = '', claims: object = {}): string {
+  const encoded = btoa(JSON.stringify({ sub, ...claims })).replace(/=+$/, '');
+  return `header.${encoded}.signature${variant}`;
+}
+
+/**
+ * Stubs `fetch` with a Kirora that refuses the tokens `refuses` names, with a 401, and
+ * accepts every event otherwise. Returns the tokens each call was sent with, in order.
+ */
+export function kiroraRefusing(refuses: (token: string) => boolean): string[] {
+  const tokens: string[] = [];
+  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
+    const token = new Headers(init.headers).get('authorization')!.slice('Bearer '.length);
+    tokens.push(token);
+    return Promise.resolve(
+      refuses(token) ? new Response(null, { status: 401 }) : accepted(init.body),
+    );
+  });
+  return tokens;
 }
 
 /** The user a request was sent as: the `sub` of its token, as made by `tokenFor`. */
@@ -190,4 +209,19 @@ export function pushClient(options: Partial<KiroraOptions> = {}) {
     logLevel: 'none',
     ...options,
   });
+}
+
+/** Each event sent to `fakeKirora()`, with the user it was sent as. */
+export function sentEvents(requests: SentRequest[]) {
+  return requests
+    .filter((request) => request.path === '/events/batch')
+    .flatMap((request) =>
+      (
+        request.body as { events: (SentEvent & { context: { sessionId?: string } })[] }
+      ).events.map((event) => ({
+        user: request.user,
+        name: event.name,
+        sessionId: event.context.sessionId,
+      })),
+    );
 }

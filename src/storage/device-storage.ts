@@ -64,13 +64,14 @@ export function deviceStorage(onFallback: (error: unknown) => void): DeviceStora
       memory.set(key, value);
     },
     removeItem: (key) => {
-      // Memory is only used once we've fallen back.
-      if (!persistent) memory.set(key, null);
       try {
         storage?.removeItem(key);
       } catch (error) {
         fallBack(error);
       }
+      // Memory is only used once we've fallen back. Hides a value still stored, or one
+      // that couldn't be removed, so reads match what was asked.
+      if (!persistent) memory.set(key, null);
     },
   };
 }

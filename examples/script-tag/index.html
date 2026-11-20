@@ -30,6 +30,8 @@
           'setPushConsent',
           'setPushEnabled',
           'setTrackingConsent',
+          'addNotificationClickListener',
+          'removeNotificationClickListener',
         ].forEach(function (method) {
           kirora[method] = function () {
             kirora.push([method, Array.prototype.slice.call(arguments), held()]);

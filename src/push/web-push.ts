@@ -1,3 +1,4 @@
+import type { NotificationTaps } from './notification-taps.js';
 import { SDK_NAME, type ClientApi } from '../api/client-api.js';
 import type { Identity, SignedInUser } from '../identity/identity.js';
 import { KiroraApiError, KiroraError } from '../errors.js';
@@ -46,6 +47,11 @@ type Cleanup = {
    * only registrations up to then, so a late retry can't undo a newer one.
    */
   lastSeenAt: string | undefined;
+  /**
+   * Whether a registration is on record. Only then is the browser's subscription surely
+   * Kirora's, to cancel if detaching fails: without one, it may be the site's own.
+   */
+  registered: boolean;
   /** How long the next failure waits before trying again. */
   retryDelayMs: number;
   /** No retry after this (epoch ms). */
@@ -60,6 +66,8 @@ const REGISTRATION_REFRESH_MS = 24 * 60 * 60_000;
 const FIRST_CLEANUP_RETRY_MS = 30_000;
 const MAX_CLEANUP_RETRY_MS = 5 * 60_000;
 const CLEANUP_GIVE_UP_MS = 24 * 60 * 60_000;
+/** What a detachment by a deadline leaves of it to cancel the subscription if it fails. */
+const CANCEL_TIME_MS = 1_000;
 
 /**
  * Permission prompt, push subscription and device registration. `options` is undefined
@@ -95,15 +103,18 @@ export class WebPush {
   async requestPermission(): Promise<PushPermission> {
     if (!this.options || !webPushSupported()) return 'unsupported';
     const permission = await Notification.requestPermission();
-    if (permission === 'granted') {
+    // `default` means the prompt was dismissed: nothing to tell Kirora.
+    if (permission !== 'default') {
       // Saying yes to the prompt is turning push on.
-      this.storage.removeItem(this.disabledKey);
-      await this.register();
-    }
-    // Reported too, but a failed report doesn't change the answer.
-    if (permission === 'denied') {
+      if (permission === 'granted') this.storage.removeItem(this.disabledKey);
+      // Registered, or a denial reported. A failure doesn't change the answer:
+      // getPushStatus() says whether this browser is registered.
       await this.register().catch((error: unknown) => {
-        this.log('error', "Couldn't tell Kirora notifications are blocked", error);
+        const what =
+          permission === 'granted'
+            ? 'register this browser for push'
+            : 'tell Kirora notifications are blocked';
+        this.log('error', `Couldn't ${what}`, error);
       });
     }
     // `default` means the prompt was dismissed.
@@ -129,6 +140,16 @@ export class WebPush {
         throw error;
       }
     });
+  }
+
+  /**
+   * Hands taps on Kirora pushes to `taps`, where push is on, whenever permission is
+   * granted. Returns a function that stops, or undefined if there's nothing to watch.
+   */
+  watchTaps(taps: NotificationTaps): (() => void) | undefined {
+    if (!this.options || !webPushSupported()) return undefined;
+    // A tap that opened this page can only have come with permission granted.
+    return taps.watch(this.serviceWorkerUrl, Notification.permission === 'granted');
   }
 
   /**
@@ -167,9 +188,11 @@ export class WebPush {
       return;
     }
     this.storage.setItem(this.disabledKey, '1');
+    // As for a detachment: only a subscription Kirora has on record is surely its own.
+    const ours = this.registered;
     const { user } = this.identity;
     if (user) await this.detach(user);
-    await this.oneAtATime(() => this.cancelSubscription());
+    if (ours) await this.oneAtATime(() => this.cancelSubscription());
   }
 
   private get disabled(): boolean {
@@ -225,7 +248,8 @@ export class WebPush {
     this.storage.setItem(this.registrationKey, JSON.stringify(registration));
     // For the worker, to tell Kirora when the browser replaces this subscription.
     await saveSubscription(worker.scope, {
-      url: `${this.api.baseUrl!}/push-subscription-change`,
+      url: `${this.api.apiUrl!}/client/v1/push-subscription-change`,
+      apiUrl: this.api.apiUrl!,
       clientKey: this.api.clientKey,
       sdk: SDK_NAME,
       pushAppId: pushApp.pushAppId,
@@ -299,11 +323,18 @@ export class WebPush {
     const last = this.lastRegistration();
     // Registered for someone else (another tab's sign-in took it over): not this user's
     // to detach, nor their subscription to cancel.
-    if (!last || last.userSubject !== user.subject) return Promise.resolve();
+    if (last && last.userSubject !== user.subject) return Promise.resolve();
+    // With no record, it may still have been registered (its answer lost, or storage
+    // full): detached unconditionally, wherever it could have been. Kirora answers 404 if
+    // there's nothing of this user's.
+    const couldBeRegistered =
+      this.options && webPushSupported() && Notification.permission === 'granted';
+    if (!last && !couldBeRegistered) return Promise.resolve();
     const cleanup: Cleanup = {
       user,
       installationId: this.installationId(),
-      lastSeenAt: last.lastSeenAt,
+      lastSeenAt: last?.lastSeenAt,
+      registered: last !== null,
       retryDelayMs: FIRST_CLEANUP_RETRY_MS,
       giveUpAt: Date.now() + CLEANUP_GIVE_UP_MS,
     };
@@ -328,7 +359,6 @@ export class WebPush {
     if (first && this.lastRegistration()?.userSubject === cleanup.user.subject) {
       this.storage.removeItem(this.registrationKey);
     }
-    const remaining = deadline === undefined ? undefined : deadline - Date.now();
     const since = cleanup.lastSeenAt
       ? `?lastSeenAt=${encodeURIComponent(cleanup.lastSeenAt)}`
       : '';
@@ -338,7 +368,12 @@ export class WebPush {
         // call. Once they've signed out, a refresh finds them gone and gives up, so a
         // token never comes through the next user's fetchUserToken.
         as: cleanup.user,
-        timeoutMs: remaining !== undefined && remaining > 0 ? remaining : undefined,
+        // Ends early enough to cancel the subscription by the deadline if it fails. Out
+        // of time already, it fails at once: the subscription is cancelled now, and the
+        // detachment is retried in the background.
+        timeoutMs:
+          deadline &&
+          Math.max(deadline - Date.now() - (cleanup.registered ? CANCEL_TIME_MS : 0), 1),
       });
       this.log('debug', 'Detached this browser');
       return;
@@ -347,7 +382,7 @@ export class WebPush {
       // was nothing of theirs here. Either way it's done, and the subscription is theirs.
       const done = error instanceof KiroraApiError && [404, 409].includes(error.status);
       if (done) return;
-      if (first) await this.cancelSubscription();
+      if (first && cleanup.registered) await this.cancelSubscription();
       const retryable = !(error instanceof KiroraApiError) || error.retryable;
       const retryAt =
         Date.now() +
@@ -458,12 +493,19 @@ export class WebPush {
 }
 
 function webPushSupported(): boolean {
-  return (
-    typeof navigator !== 'undefined' &&
-    'serviceWorker' in navigator &&
-    typeof PushManager !== 'undefined' &&
-    typeof Notification !== 'undefined'
-  );
+  try {
+    // Without `navigator` (server rendering), reading it throws too.
+    return (
+      // A sandboxed frame has no origin to register a worker for, and some browsers
+      // throw on reading `navigator.serviceWorker` there.
+      globalThis.origin !== 'null' &&
+      !!navigator.serviceWorker &&
+      typeof PushManager !== 'undefined' &&
+      typeof Notification !== 'undefined'
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

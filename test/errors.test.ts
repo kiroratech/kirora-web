@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import * as sdk from '../src/index.js';
 import { Kirora, KiroraApiError, KiroraError, UserTokenError } from '../src/index.js';
+import { fakeKirora, pushClient, stubWebPush, tokenFor } from './fake-kirora.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -24,7 +25,8 @@ it('logs what a malformed apiUrl should look like, without breaking the page', a
   expect(errors).toHaveBeenCalledWith(expect.stringMatching(expected));
 
   kirora.track('Invoice Paid');
-  await kirora.identify('token');
+  await expect(kirora.identify('token')).rejects.toThrow(expected);
+  await expect(kirora.identify('token')).rejects.toBeInstanceOf(KiroraError);
   await kirora.flush();
   await expect(kirora.setPushConsent(true)).rejects.toThrow(expected);
   expect(fetch).not.toHaveBeenCalled();
@@ -66,3 +68,75 @@ it.each([undefined, null, 'kirora_pk_test', { clientKey: 123 }])(
     errors.mockRestore();
   },
 );
+
+it('logs nothing while server rendering, where there is no localStorage', () => {
+  vi.stubGlobal('localStorage', undefined);
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  new Kirora({ clientKey: 'kirora_pk_test' }).track('Signup Started');
+  expect(errors).not.toHaveBeenCalled();
+  errors.mockRestore();
+});
+
+it('turns a call that could not reach Kirora into a KiroraError, keeping the cause', async () => {
+  const offline = new TypeError('Failed to fetch');
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(offline));
+  const kirora = new Kirora({ clientKey: 'kirora_pk_test', logLevel: 'none' });
+  await kirora.identify(tokenFor('u'));
+  const error = await kirora.setPushConsent(true).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(KiroraError);
+  expect(error).not.toBeInstanceOf(KiroraApiError);
+  expect((error as KiroraError).cause).toBe(offline);
+});
+
+it('rejects with a KiroraError for an aborted call too', async () => {
+  const aborted = new DOMException('Aborted', 'AbortError');
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(aborted));
+  const kirora = new Kirora({ clientKey: 'kirora_pk_test', logLevel: 'none' });
+  await kirora.identify(tokenFor('u'));
+  const error = await kirora.setPushConsent(true).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(KiroraError);
+  expect((error as KiroraError).cause).toBe(aborted);
+});
+
+it('rejects setPushConsent when Kirora refuses it', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { code: 'INTERNAL_ERROR', message: 'Down' } }),
+        {
+          status: 500,
+        },
+      ),
+    ),
+  );
+  const kirora = new Kirora({ clientKey: 'kirora_pk_test', logLevel: 'none' });
+  await kirora.identify(tokenFor('u'));
+  await expect(kirora.setPushConsent(true)).rejects.toBeInstanceOf(KiroraApiError);
+});
+
+it("answers requestPushPermission even when the browser can't subscribe", async () => {
+  const refused = new DOMException('Registration failed', 'AbortError');
+  stubWebPush(Promise.reject(refused));
+  fakeKirora();
+  vi.stubGlobal('Notification', {
+    permission: 'default',
+    requestPermission: () => Promise.resolve('granted'),
+  });
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const kirora = pushClient({ logLevel: 'error' });
+  await kirora.identify(tokenFor('alice'));
+  vi.stubGlobal('Notification', {
+    permission: 'granted',
+    requestPermission: () => Promise.resolve('granted'),
+  });
+  // The answer stands; the failure is logged, and the status says it isn't registered.
+  expect(await kirora.requestPushPermission()).toBe('granted');
+  expect(errors).toHaveBeenCalledWith(
+    expect.stringContaining("Couldn't register this browser"),
+    refused,
+  );
+  expect(await kirora.getPushStatus()).toBe('disabled');
+  errors.mockRestore();
+  kirora.destroy();
+});

@@ -6,6 +6,8 @@
 export type SavedSubscription = {
   /** `POST /client/v1/push-subscription-change` on the page's Kirora. */
   url: string;
+  /** The page's `apiUrl`, without a trailing slash: push reports go only under it. */
+  apiUrl: string;
   clientKey: string;
   /** The `Kirora-SDK` header. */
   sdk: string;

@@ -32,7 +32,8 @@ together.
 Before submitting:
 
 - Add or update tests for your change.
-- Run `pnpm lint`, `pnpm typecheck`, `pnpm test` and `pnpm format:check`.
+- Run `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` and
+  `pnpm size`.
 - Update the README if you changed public behaviour.
 - Once the SDK is on npm, run `pnpm changeset` to describe any change users will
   notice. It goes in the changelog and decides the next version.
@@ -70,7 +71,7 @@ src/
   api/             the /client/v1 transport: headers, timeouts, errors
   events/          the offline queue and batched delivery
   tracking/        events, sessions, page context and lifecycle, consent, installation id
-  push/            web push registration
+  push/            web push registration and notification taps
     worker/        the service worker, built to dist/kirora-sw.js (own tsconfig)
   storage/         localStorage with its memory fallback, cookies, and every key name
   utils/           logging, UUIDs, base64url, timeouts
@@ -109,8 +110,10 @@ Change it there first.
 
 ### Releases
 
-Merging to `main` opens or updates a "Version packages" pull request from the pending
-changesets. Merging that pull request publishes to npm with provenance.
+Until the first release, the Release workflow only runs by hand (Actions → Release), so
+merging to `main` publishes nothing. Once releases start, it runs on every merge to `main`:
+it opens or updates a "Version packages" pull request from the pending changesets, and
+merging that pull request publishes to npm with provenance.
 
 By contributing, you agree that your contributions are licensed under the
 [MIT License](LICENSE).

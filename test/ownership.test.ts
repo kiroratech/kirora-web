@@ -1,35 +1,16 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { Kirora, type KiroraOptions } from '../src/index.js';
-import {
-  accepted,
-  fakeKirora,
-  tokenFor,
-  userOf,
-  type SentRequest,
-} from './fake-kirora.js';
+import { accepted, fakeKirora, tokenFor, sentEvents, userOf } from './fake-kirora.js';
 
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
-function client(options: Partial<KiroraOptions> = {}) {
-  return new Kirora({ clientKey: 'kirora_pk_a', logLevel: 'none', ...options });
-}
-
 type SentEvent = { name: string; context: { sessionId?: string } };
 
-/** Each event sent, with the user it was sent as. */
-function sentEvents(requests: SentRequest[]) {
-  return requests
-    .filter((request) => request.path === '/events/batch')
-    .flatMap((request) =>
-      (request.body as { events: SentEvent[] }).events.map((event) => ({
-        user: request.user,
-        name: event.name,
-        sessionId: event.context.sessionId,
-      })),
-    );
+function client(options: Partial<KiroraOptions> = {}) {
+  return new Kirora({ clientKey: 'kirora_pk_a', logLevel: 'none', ...options });
 }
 
 it('makes events from before sign-in the first user’s, never the next one’s', async () => {

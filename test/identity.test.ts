@@ -106,3 +106,45 @@ it('tells apart users whose tokens name no one', async () => {
   expect(identity.user!.subject).not.toBe(first);
   expect(identity.user!.subject).not.toBeNull();
 });
+
+it('keeps failures quiet until every overlapping logout() of the user is done', async () => {
+  const failures: string[] = [];
+  const identity = new Identity(undefined, (reason) => failures.push(reason));
+  await identity.signIn(tokenFor('alice'), nothing);
+  const alice = identity.user!;
+  identity.signingOut(alice);
+  identity.signingOut(alice);
+  // The first logout() ends while the second is still on its way out.
+  identity.signedOut(alice);
+  identity.authFailed(alice, 'refused');
+  await new Promise((resolve) => setTimeout(resolve));
+  expect(failures).toEqual([]);
+
+  // Both done, and Alice still signed in: news again.
+  identity.signedOut(alice);
+  identity.authFailed(alice, 'refused');
+  await new Promise((resolve) => setTimeout(resolve));
+  expect(failures).toEqual(['refused']);
+});
+
+it("marks only that user's token refused, not whoever signed in since", async () => {
+  const identity = new Identity(undefined);
+  await identity.signIn(tokenFor('alice'), nothing);
+  const alice = identity.user!;
+  await identity.signIn(tokenFor('bob'), nothing);
+  const bob = identity.user!;
+  // A late call for Alice, signed out, is refused.
+  await identity.refresh(alice, alice.token);
+  expect(identity.tokenRefused(alice)).toBe(true);
+  expect(identity.tokenRefused(bob)).toBe(false);
+});
+
+it("doesn't keep Node running with its refresh timer, as when server rendering", async () => {
+  const identity = new Identity(() => Promise.resolve(tokenFor('alice')));
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  await identity.signIn(tokenFor('alice', '', { exp }), nothing);
+  const timer = (identity as unknown as { refreshTimer: { hasRef(): boolean } })
+    .refreshTimer;
+  expect(timer.hasRef()).toBe(false);
+  identity.end();
+});

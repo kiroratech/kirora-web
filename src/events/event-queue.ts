@@ -100,14 +100,18 @@ export class EventQueue {
     return written;
   }
 
-  /** `owner`'s oldest events: only an event's own user ever sends it. */
-  oldest(count: number, owner: string): Promise<QueuedEvent[]> {
-    return this.exclusively(() =>
-      this.read()
+  /**
+   * `owner`'s oldest events: only an event's own user ever sends it. `now` reads them at
+   * once, unlocked, with those added but not yet written: as the page goes away, a locked
+   * read comes too late to send anything. A read alone can't lose another tab's events.
+   */
+  oldest(count: number, owner: string, now = false): Promise<QueuedEvent[]> {
+    const pick = () =>
+      [...this.read(), ...((now && this.batch?.stored) || [])]
         .filter((stored) => stored.owner === owner)
         .slice(0, count)
-        .map((stored) => stored.event),
-    );
+        .map((stored) => stored.event);
+    return now ? Promise.resolve(pick()) : this.exclusively(pick);
   }
 
   /**

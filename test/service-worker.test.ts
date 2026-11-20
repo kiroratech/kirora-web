@@ -1,30 +1,98 @@
 import { beforeAll, expect, it, vi } from 'vitest';
+import { saveSubscription } from '../src/push/subscription-store.js';
+import { stubIndexedDB } from './fake-indexeddb.js';
+import { PUSH_APP_KEY } from './fake-kirora.js';
 
 type Listener = (event: Record<string, unknown>) => void;
 const listeners: Record<string, Listener> = {};
 const shown: { title: string; options: { data?: unknown } }[] = [];
 const opened: string[] = [];
 const reported: { url: string; body: unknown }[] = [];
+/** What happened, in order, for the tap tests. */
+const timeline: string[] = [];
+
+/** A browser tab, as the worker sees it. */
+function windowClient(id: string, focused = false) {
+  const messages: unknown[] = [];
+  const tab = {
+    id,
+    focused,
+    messages,
+    postMessage: (message: unknown) => {
+      timeline.push(`message to ${id}`);
+      messages.push(message);
+    },
+    focus: () => {
+      timeline.push(`focus ${id}`);
+      return Promise.resolve(tab);
+    },
+  };
+  return tab;
+}
+type Tab = ReturnType<typeof windowClient>;
+/** The tabs open on the site, and the one the next openWindow() gives. */
+let tabs: Tab[] = [];
+let nextWindow: Tab | null = null;
 
 beforeAll(async () => {
   vi.stubGlobal('self', {
     addEventListener: (type: string, listener: Listener) => (listeners[type] = listener),
     registration: {
+      scope: 'https://example.com/',
       showNotification: (title: string, options: { data?: unknown }) => {
         shown.push({ title, options });
         return Promise.resolve();
       },
     },
-    clients: { openWindow: (url: string) => void opened.push(url) },
+    clients: {
+      openWindow: (url: string) => {
+        opened.push(url);
+        const tab = nextWindow;
+        nextWindow = null;
+        return Promise.resolve(tab);
+      },
+      matchAll: () => Promise.resolve(tabs),
+    },
   });
   vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
     reported.push({ url, body: JSON.parse(String(init.body)) });
+    timeline.push(`report ${(JSON.parse(String(init.body)) as { event: string }).event}`);
     return Promise.resolve(new Response(null, { status: 204 }));
+  });
+  // The page registered this browser with its own apiUrl.
+  stubIndexedDB();
+  await saveSubscription('https://example.com/', {
+    url: 'https://api.example.com/client/v1/push-subscription-change',
+    apiUrl: 'https://api.example.com',
+    clientKey: 'kirora_pk_a',
+    sdk: 'kirora-web/1.0.0',
+    pushAppId: 'app_web',
+    vapidPublicKey: PUSH_APP_KEY,
+    subscription: { endpoint: 'https://push.example.com/a' },
   });
   // Through a variable: the worker is type-checked with its own WebWorker tsconfig.
   const worker = '../src/push/worker/kirora-sw.ts';
   await import(/* @vite-ignore */ worker);
 });
+
+it.each([
+  'https://evil.example/t/p/abc',
+  'https://api.example.com.evil.example/t/p/abc',
+  'http://api.example.com/t/p/abc',
+  'https://api.example.com:8443/t/p/abc',
+  'https://user@api.example.com/t/p/abc',
+  'https://api.example.com/t/x/abc',
+  'https://api.example.com/t/p/../../steal',
+  'https://api.example.com/t/p/%2e%2e/steal',
+  'not a url',
+])(
+  'reports nowhere but under the apiUrl the page registered with: %s',
+  async (trackingUrl) => {
+    const before = reported.length;
+    await deliver(JSON.stringify({ kirora: 'true', title: 'Hi', trackingUrl }));
+    expect(reported.length).toBe(before);
+  },
+);
 
 /** Delivers a push, then clicks whatever it showed. */
 async function deliver(data: string, action = '') {
@@ -66,9 +134,15 @@ it('shows a test push, which has no tracking URL, without reporting it', async (
   expect(reported).toHaveLength(reports);
 });
 
-it('still shows pushes from servers before the kirora marker', async () => {
-  const push = JSON.stringify({ title: 'Old server', trackingUrl: 'https://t/p/x' });
-  expect((await deliver(push))?.title).toBe('Old server');
+it("leaves pushes without Kirora's marker alone, tracking URL or not", async () => {
+  for (const marker of [{}, { kirora: 1 }]) {
+    const push = {
+      ...marker,
+      title: 'No marker',
+      trackingUrl: 'https://api.example.com/t/p/x',
+    };
+    expect(await deliver(JSON.stringify(push))).toBeUndefined();
+  }
 });
 
 it("leaves other services' pushes and unreadable payloads alone", async () => {
@@ -111,7 +185,11 @@ it('reports no delivery for a push that could not be shown', async () => {
   registration.showNotification = () => Promise.reject(new TypeError('No permission'));
   try {
     expect(
-      await show({ kirora: 'true', title: 'Hi', trackingUrl: 'https://t/p/jkl' }),
+      await show({
+        kirora: 'true',
+        title: 'Hi',
+        trackingUrl: 'https://api.example.com/t/p/jkl',
+      }),
     ).toEqual([]);
   } finally {
     registration.showNotification = showNotification;
@@ -129,7 +207,11 @@ it('tries a failed report once more, then drops it', async () => {
     });
     return () => attempts;
   };
-  const push = { kirora: 'true', title: 'Hi', trackingUrl: 'https://t/p/mno' };
+  const push = {
+    kirora: 'true',
+    title: 'Hi',
+    trackingUrl: 'https://api.example.com/t/p/mno',
+  };
   try {
     for (const status of [503, 429]) {
       const attempts = answering(status);
@@ -147,4 +229,95 @@ it('tries a failed report once more, then drops it', async () => {
   } finally {
     vi.stubGlobal('fetch', recordAndAnswer);
   }
+});
+
+/** Shows a push and taps it, leaving the worker's work going. */
+async function tap(push: Record<string, unknown>) {
+  const waits: Promise<unknown>[] = [];
+  const waitUntil = (promise: Promise<unknown>) => void waits.push(promise);
+  listeners.push!({ data: { json: () => push }, waitUntil });
+  await Promise.all(waits);
+  timeline.length = 0;
+  listeners.notificationclick!({
+    action: '',
+    notification: { data: shown.at(-1)!.options.data, close: () => undefined },
+    waitUntil,
+  });
+  return () => Promise.all(waits);
+}
+
+/** The page's SDK saying it listens, as `push/notification-taps.ts` does. */
+function pageListens(tab: Tab) {
+  listeners.message!({ data: { kirora: 'listening' }, source: tab });
+}
+
+it("hands the push's data to the page its link opened, after the report", async () => {
+  const page = windowClient('page-1');
+  nextWindow = page;
+  const done = await tap({
+    kirora: 'true',
+    title: 'Your order shipped',
+    actionUrl: 'https://example.com/orders/42',
+    trackingUrl: 'https://api.example.com/t/p/tap1',
+    data: { orderId: '42' },
+  });
+  await vi.waitFor(() => expect(page.messages).toHaveLength(1));
+  expect(timeline).toEqual(['report clicked', 'message to page-1']);
+  expect(page.messages[0]).toEqual({
+    kirora: 'notificationClick',
+    id: expect.any(String),
+    data: { orderId: '42' },
+  });
+  // The page's SDK wasn't listening yet: it asks once it is, and gets the same tap.
+  pageListens(page);
+  await done();
+  expect(page.messages).toHaveLength(2);
+  expect(page.messages[1]).toEqual(page.messages[0]);
+});
+
+it('holds a tap for a page whose SDK takes a while to load', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    const page = windowClient('page-slow');
+    nextWindow = page;
+    const done = await tap({ kirora: 'true', title: 'Hi', data: { orderId: '7' } });
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(page.messages).toHaveLength(1);
+    pageListens(page);
+    expect(page.messages).toHaveLength(2);
+    expect(page.messages[1]).toEqual(page.messages[0]);
+    await done();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('brings an open tab of the site forward for a push with no link', async () => {
+  const other = windowClient('tab-a');
+  const focused = windowClient('tab-b', true);
+  tabs = [other, focused];
+  const openedBefore = opened.length;
+  try {
+    const done = await tap({
+      kirora: 'true',
+      title: 'Hello',
+      trackingUrl: 'https://api.example.com/t/p/tap2',
+      data: { screen: 'inbox' },
+    });
+    await vi.waitFor(() => expect(focused.messages).toHaveLength(1));
+    // An open tab already listens, so the tap isn't held for it.
+    await done();
+    expect(opened).toHaveLength(openedBefore);
+    expect(timeline).toContain('focus tab-b');
+    expect(timeline).toContain('report opened');
+    expect(other.messages).toEqual([]);
+  } finally {
+    tabs = [];
+  }
+});
+
+it("opens the site's start page for a push with no link when no tab is open", async () => {
+  const done = await tap({ kirora: 'true', title: 'Hello' });
+  await done();
+  expect(opened.at(-1)).toBe('https://example.com/');
 });

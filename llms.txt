@@ -107,6 +107,9 @@ In a module of its own, created once, outside components: `lib/kirora.ts`, or
   (Next.js), `VITE_KIRORA_CLIENT_KEY` read as `import.meta.env.VITE_KIRORA_CLIENT_KEY`
   (Vite), `NUXT_PUBLIC_KIRORA_CLIENT_KEY` (Nuxt). Hard-coding it is fine too; it's public.
 - If the app has a base path (Next.js `basePath`, Vite `base`), include it in the fetch.
+- If the app can sign a user out or ask them to sign in again, offer
+  `onAuthenticationFailed: (reason) => …` (`'fetch_failed'` or `'refused'`): it's called
+  when the user's token fails in the background, where no method call would say so.
 - Only call the SDK from client code: in Next.js, from `'use client'` components. The
   module may still be imported while rendering on the server; that's safe, since the
   server rendering does not start browser listeners. In the browser, sessions and optional
@@ -219,6 +222,10 @@ and pass its id as `push: { pushAppId: '…' }`; otherwise `push: true` is enoug
 4. If the app has a notifications on/off setting, wire it to
    `kirora.getPushStatus()` (`'enabled'` means on) and `kirora.setPushEnabled(on)`. That's
    this browser's own switch, kept for whoever signs in; it is not marketing consent.
+5. Taps open the push's link, or bring the site forward when it has none. Only if the
+   developer routes on a push's `data` in their own code, add a listener once, next to
+   the client: `kirora.addNotificationClickListener((data) => …)`. `data` holds the
+   string values the sender put in the push's `data`.
 
 ## Step 8: check it works
 

@@ -12,6 +12,14 @@
     "browser"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kiroratech/kirora-web.git"
+  },
+  "homepage": "https://github.com/kiroratech/kirora-web#readme",
+  "bugs": {
+    "url": "https://github.com/kiroratech/kirora-web/issues"
+  },
   "type": "module",
   "exports": {
     ".": {

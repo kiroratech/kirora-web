@@ -132,3 +132,16 @@ it('still takes calls made through the snippet once the backlog has replayed', a
     ['bob', ['Bob Event']],
   ]);
 });
+
+it('adds a click listener queued before the SDK loaded', async () => {
+  fakeKirora();
+  const listener = () => undefined;
+  const snippet = loaderSnippet({ clientKey: 'kirora_pk_a', logLevel: 'none' }, [
+    ['addNotificationClickListener', listener],
+  ]);
+  await loadCdn(snippet);
+  const kirora = await replayed();
+  const { listeners } = (kirora as unknown as { taps: { listeners: Set<unknown> } }).taps;
+  expect(listeners.has(listener)).toBe(true);
+  kirora.destroy();
+});
