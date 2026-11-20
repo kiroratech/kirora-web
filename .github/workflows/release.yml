@@ -1,8 +1,9 @@
 name: Release
 
+# Run by hand only until the first release: on a push to main, changesets would publish
+# the package to npm. Put the push trigger back when it's time to release.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
