@@ -747,3 +747,45 @@ it('leaves a pending detachment alone where apiUrl is unusable', async () => {
   expect(retries).toEqual([]);
   kirora.destroy();
 });
+
+/** Web Locks as in a tab whose queue lock another, suspended tab holds: once `stuck`. */
+function stuckLocks() {
+  const state = { stuck: false };
+  vi.stubGlobal('navigator', {
+    language: 'en',
+    locks: {
+      request: (_name: string, ...rest: unknown[]) => {
+        const operation = rest.at(-1) as () => Promise<unknown>;
+        return state.stuck ? new Promise(() => undefined) : operation();
+      },
+      query: () => Promise.resolve({ held: [], pending: [] }),
+    },
+  });
+  return state;
+}
+
+it.each([
+  ['with a user signed in', true],
+  ['with nobody signed in', false],
+])(
+  'returns from logout() within its deadline %s, though the queue lock never comes',
+  async (_, signIn) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    stubLocalStorage();
+    fakeKirora();
+    const locks = stuckLocks();
+    const kirora = client();
+    if (signIn) {
+      await kirora.identify(tokenFor('ada'));
+    }
+
+    locks.stuck = true;
+    let returned = false;
+    void kirora.logout().then(() => {
+      returned = true;
+    });
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(returned).toBe(true);
+    kirora.destroy();
+  },
+);

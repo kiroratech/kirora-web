@@ -264,9 +264,11 @@ export class Kirora {
       // Of the events waiting, only those that continued a signed-in user's session are
       // theirs: a plain visitor's stay, for when they sign up.
       const borrowed = waitingBefore.then(({ borrowed }) => borrowed);
+      // Within the deadline, as all of logout() is: the queue's lock may be held by a
+      // suspended tab. What's left carries on in the background, in order.
       await Promise.all([
         settledBy(this.push.detachBySecret(deadline), deadline),
-        this.dropEventsFromBeforeSignIn(borrowed),
+        settledBy(this.dropEventsFromBeforeSignIn(borrowed), deadline),
       ]);
       // Whoever it was, activity here no longer continues their session.
       this.tracker.signedOut(undefined);
@@ -286,12 +288,15 @@ export class Kirora {
           "Gave up waiting for Kirora; the user's unsent events are dropped",
         );
       }
-      await this.dropEventsFromBeforeSignIn(waitingBefore.then(({ all }) => all));
+      // Queue cleanup within the deadline too (as above), carrying on after it if need be.
+      const all = waitingBefore.then(({ all }) => all);
+      await settledBy(this.dropEventsFromBeforeSignIn(all), deadline);
       const signedOut = this.identity.signOut(user);
       // Anything left is this user's, so it never goes as the next one; but if they
       // signed in again meanwhile, it's theirs to send.
       if (this.identity.user?.subject !== user.subject) {
-        await this.queue.clearOwnedBy((owner) => owner === user.subject);
+        const cleared = this.queue.clearOwnedBy((owner) => owner === user.subject);
+        await settledBy(cleared, deadline);
       }
       if (signedOut) {
         this.tracker.signedOut(user.subject);
