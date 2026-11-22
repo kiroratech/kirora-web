@@ -15,6 +15,11 @@ export const STORAGE_KEYS = {
   eventsRevision: (namespace: string) => `kirora:events:${namespace}:revision`,
   /** Who this browser was last registered for push as. */
   pushRegistration: (namespace: string) => `kirora:push-registration:${namespace}`,
+  /**
+   * A detachment still being retried, with the device secret it goes with, so a reload
+   * carries on with it (within the day from the sign-out).
+   */
+  pushPendingDetach: (namespace: string) => `kirora:push-pending-detach:${namespace}`,
   /** Set while `setPushEnabled(false)` holds: the device's choice, kept past sign-out. */
   pushDisabled: (namespace: string) => `kirora:push-disabled:${namespace}`,
   /** The live sessions, one per user: id, owner and last activity. Shared across subdomains. */

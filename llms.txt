@@ -165,7 +165,10 @@ returns within 5 seconds, so it can't block signing out; no try/catch is needed.
 library call like Auth.js `signOut()`, make the sign-out button a client component that
 awaits `kirora.logout()` first, then calls the action or submits the form. If a session
 ends some other way (expiry, another tab), nothing else is needed: the next `identify()`
-takes over and the previous user's unsent events are never sent as the new one.
+takes over and the previous user's unsent events are never sent as the new one. Make sure
+`identify()` runs on every page load while signed in, including when the app restores its
+own session: `logout()` then drops the events from before sign-in and detaches the
+browser (with nobody identified, by the device secret Kirora gave it at registration).
 
 ## Step 5: track events
 

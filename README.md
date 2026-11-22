@@ -126,9 +126,9 @@ export const kirora = new Kirora({
 
 ### Identify users
 
-Call `identify()` on every page load where the user is signed in, and right after they
-sign in. Call `logout()` before your own sign-out, while the token route can still
-authenticate the user.
+Call `identify()` on every page load where the user is signed in, including when your app
+restores its own session, and right after they sign in. Call `logout()` before your own
+sign-out, while the token route can still authenticate the user.
 
 ```ts
 try {
@@ -150,16 +150,21 @@ promises from `identify()` and the push methods that can reject in your applicat
 
 `logout()` never rejects and returns within 5 seconds, whatever the network does. In that
 time it tries, side by side, to send the user's queued events and detach this browser
-from their pushes; then it forgets the user and anything of theirs still unsent. Events
-tracked while it runs go to whoever signs in next. If Kirora can't
-be told, the SDK cancels the browser's push subscription and keeps retrying the
-detachment in the background (for up to a day) while the page stays open. A late retry
-never undoes a newer sign-in: it names the registration it's detaching, so if the same
-user signs in again meanwhile, in any tab, Kirora keeps their new registration, and if
-someone else has signed in, it leaves theirs alone. Those retries live in memory only: if
-the browser is offline at sign-out and the page closes, Kirora isn't told until the device
-is registered again, so sign-out can't promise the server stops pushes at once. The
-cancelled subscription stops them on this browser.
+from their pushes; then it forgets the user and anything of theirs still unsent, and the
+events waiting from before sign-in, which they tracked too, so the next user to sign in
+never gets them. Events tracked while it runs go to whoever signs in next.
+
+With nobody signed in (a reload where your app restored its session but `identify()`
+hasn't run yet), `logout()` still detaches this browser, with a device secret Kirora gave
+it when it registered: an API credential that can only detach that registration.
+
+If Kirora can't be told, the SDK cancels the browser's push subscription and keeps
+retrying the detachment in the background, for up to a day, with the user's token while
+Kirora accepts it and then the device secret. A page loaded later carries on with it. A
+late retry never undoes a newer sign-in: it names the registration it's detaching, so if
+the same user signs in again meanwhile, in any tab, Kirora keeps their new registration,
+and if someone else has signed in, it leaves theirs alone. The cancelled subscription
+stops pushes on this browser at once.
 
 Tokens stay in memory, so identification must run again after a reload. With
 `fetchUserToken`, the SDK asks for a fresh token a minute before the current one's `exp`,
@@ -701,12 +706,13 @@ Creating the client also briefly writes and removes `kirora:probe` to test stora
 | Cookie on your root domain, and `localStorage` | `kirora_installation_id_…`, `kirora:installation-id:<client key>@<api host and path>` | `device.id`: a random id for this browser                                                                                                                  | On consent withdrawal, unless the browser is registered for push: then at `logout()`                                                                         |
 | `localStorage`                                 | `kirora:tracking-consent:<client key>@<api host and path>`                            | The visitor's tracking consent answer                                                                                                                      | Never; it's their answer. A grant is deleted if a later refusal can't be saved, so it can't come back                                                        |
 | `localStorage`                                 | `kirora:tracking-refused:<client key>@<api host and path>`                            | A second copy of a tracking refusal                                                                                                                        | When the visitor grants tracking consent                                                                                                                     |
-| `localStorage`                                 | `kirora:push-registration:<client key>@<api host and path>`                           | Who this browser was registered for, its push endpoint, and when                                                                                           | At `logout()` and `setPushEnabled(false)`                                                                                                                    |
+| `localStorage`                                 | `kirora:push-registration:<client key>@<api host and path>`                           | Who this browser was registered for, its push endpoint, when, and the device secret that can detach it                                                     | At `logout()` and `setPushEnabled(false)`                                                                                                                    |
+| `localStorage`                                 | `kirora:push-pending-detach:<client key>@<api host and path>`                         | A detachment still being retried: the device id, the registration it names, and its device secret                                                          | Once Kirora answers it, or after a day                                                                                                                       |
 | `localStorage`                                 | `kirora:push-disabled:<client key>@<api host and path>`                               | That `setPushEnabled(false)` holds on this browser                                                                                                         | At `setPushEnabled(true)`, or when the prompt is answered `granted`                                                                                          |
 | IndexedDB                                      | `kirora-push` database                                                                | The push subscription last registered, the client key and API address, for the service worker                                                              | When Kirora refuses a replaced subscription, at `setPushEnabled(false)`, or when a failed detach cancels the subscription; replaced by the next registration |
 | IndexedDB                                      | `kirora-locks` database                                                               | The queue's write count (as above), and a lock between tabs in browsers without Web Locks                                                                  | Never; it holds only numbers                                                                                                                                 |
 | The browser's push service                     | (the push subscription)                                                               | Where to deliver pushes                                                                                                                                    | At `setPushEnabled(false)`, or if `logout()` can't reach Kirora; otherwise kept for the next user                                                            |
-| Memory only                                    |                                                                                       | The user token                                                                                                                                             | When the page closes, or at `logout()`; a signed-out user's is kept until their browser is detached (at most a day)                                          |
+| Memory only                                    |                                                                                       | The user token                                                                                                                                             | When the page closes, or at `logout()`; a signed-out user's is kept until their browser is detached (at most a day), never stored                            |
 
 The cookies are `SameSite=Lax`, `Secure` on HTTPS, and last a year; their value is the
 same as the `localStorage` copy, which restores a cleared cookie. If `localStorage` is

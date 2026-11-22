@@ -131,6 +131,9 @@ export class Kirora {
     if (this.consent.refused) {
       this.forgetTracking();
     }
+    // A detachment an earlier page left still being retried carries on.
+    this.push.resumePendingDetach();
+
     // Server rendering: nothing to watch, and nothing happens until identify().
     if (typeof document !== 'undefined') {
       this.watchPage(options);
@@ -228,6 +231,20 @@ export class Kirora {
       return;
     }
     const deadline = Date.now() + LOGOUT_DEADLINE_MS;
+
+    // Whoever signs out tracked the events waiting from before sign-in, so the next user
+    // to sign in must not adopt them. Noted now, so events tracked during this logout,
+    // which wait for the next user, are kept; dropped once a sign-in under way has
+    // settled, as it adopts those it can, for the user signing out.
+    const unboundBefore = this.queue.unboundKeys().catch(() => new Set<string>());
+    const dropUnbound = async () => {
+      try {
+        await this.queue.removeUnbound(await unboundBefore);
+      } catch (error) {
+        this.log('error', "Couldn't clear events", error);
+      }
+    };
+
     // Who this logout is for is decided by what came before it, never by an identify()
     // called after it.
     const generationBefore = this.identity.generation;
@@ -246,6 +263,10 @@ export class Kirora {
     // was signed in then. A sign-in started since is newer, so it stays.
     const user = newerSignIn ? userBefore : this.identity.user;
     if (!user) {
+      // Nobody signed in, as after a reload where the app restored its own session: the
+      // device's last registration is still detached, by its device secret.
+      await settledBy(this.push.detach(null, deadline), deadline);
+      await dropUnbound();
       return;
     }
     this.identity.signingOut(user);
@@ -262,6 +283,7 @@ export class Kirora {
           "Gave up waiting for Kirora; the user's unsent events are dropped",
         );
       }
+      await dropUnbound();
       const signedOut = this.identity.signOut(user);
       // Anything left is this user's, so it never goes as the next one; but if they
       // signed in again meanwhile, it's theirs to send.

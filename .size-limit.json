@@ -3,12 +3,12 @@
     "name": "npm: import { Kirora }",
     "path": "dist/index.js",
     "import": "{ Kirora }",
-    "limit": "13.9 kB"
+    "limit": "14.4 kB"
   },
   {
     "name": "Script tag (kirora.min.js)",
     "path": "dist/kirora.min.js",
-    "limit": "14.2 kB"
+    "limit": "14.7 kB"
   },
   {
     "name": "Service worker (kirora-sw.js)",

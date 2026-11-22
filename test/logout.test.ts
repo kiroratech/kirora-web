@@ -237,7 +237,7 @@ it("finishes A's late detach harmlessly once B has the browser", async () => {
   kirora.destroy();
 });
 
-it('refreshes the token once at logout, then stops on a refusal', async () => {
+it('refreshes the token once at logout, then goes on with the device secret, and stops when that is refused too', async () => {
   stubWebPush();
   stubIndexedDB();
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -252,7 +252,12 @@ it('refreshes the token once at logout, then stops on a refusal', async () => {
   await kirora.logout();
   await vi.advanceTimersByTimeAsync(60 * 60_000);
   expect(fetchUserToken).toHaveBeenCalledTimes(1);
-  expect(deletes(calls)).toEqual(['DELETE /devices ada', 'DELETE /devices ada']);
+  // The token, the refreshed token, then the device secret, which names no user.
+  expect(deletes(calls)).toEqual([
+    'DELETE /devices ada',
+    'DELETE /devices ada',
+    'DELETE /devices undefined',
+  ]);
   kirora.destroy();
 });
 

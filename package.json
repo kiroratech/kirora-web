@@ -37,7 +37,8 @@
   "unpkg": "dist/kirora.min.js",
   "files": [
     "dist",
-    "llms.txt"
+    "llms.txt",
+    "CHANGELOG.md"
   ],
   "sideEffects": [
     "./dist/kirora-sw.js",

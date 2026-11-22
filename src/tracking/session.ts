@@ -57,14 +57,20 @@ export function endSession(store: SessionStore, owner?: string): void {
  * Activity with no one signed in (a page loading before `identify()`) continues the
  * latest live session, whoever's: a reload doesn't end a signed-in user's visit. Such a
  * session is `borrowedFrom` that user, so it's left out of the events if someone else
- * adopts them. A session begun before sign-in becomes the user's who signs in.
+ * adopts them. A session begun before sign-in becomes the user's who signs in. With
+ * `borrow` false (after a sign-out in this tab), activity with no one signed in never
+ * continues someone else's session.
  */
-export function touchSession(store: SessionStore, owner: string | null): TouchedSession {
+export function touchSession(
+  store: SessionStore,
+  owner: string | null,
+  borrow = true,
+): TouchedSession {
   const sessions = liveSessions(store);
 
   let key: string;
   if (owner === null) {
-    key = latest(sessions) ?? NO_ONE;
+    key = borrow ? (latest(sessions) ?? NO_ONE) : NO_ONE;
   } else {
     key = claimedKey(sessions, owner);
   }
@@ -85,14 +91,24 @@ export function touchSession(store: SessionStore, owner: string | null): Touched
  * Extends `owner`'s session (as `touchSession` picks it) without starting one, so time on
  * a visible page never ends a visit but a timer alone never begins one.
  */
-export function keepSessionAlive(store: SessionStore, owner: string | null): void {
+export function keepSessionAlive(
+  store: SessionStore,
+  owner: string | null,
+  borrow = true,
+): void {
   const sessions = liveSessions(store);
-  const key = owner === null ? latest(sessions) : claimedKey(sessions, owner);
-  if (key === undefined || !sessions[key]) {
+  let key: string | undefined;
+  if (owner !== null) {
+    key = claimedKey(sessions, owner);
+  } else {
+    key = borrow ? latest(sessions) : NO_ONE;
+  }
+  const current = key === undefined ? undefined : sessions[key];
+  if (!current) {
     return;
   }
 
-  sessions[key].lastActivityAt = Date.now();
+  current.lastActivityAt = Date.now();
   save(store, sessions);
 }
 

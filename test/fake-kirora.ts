@@ -174,6 +174,10 @@ export type SentRequest = {
   method: string;
   path: string;
   user: string | undefined;
+  /** The `Authorization` header as sent: `Bearer <token>` or `Device <secret>`. */
+  authorization: string | null;
+  /** The query string, with its `?`, or empty. */
+  search: string;
   body?: unknown;
 };
 
@@ -196,6 +200,8 @@ export function fakeKirora(
       method: init.method ?? 'GET',
       path: new URL(url).pathname.replace('/client/v1', ''),
       user: userOf(init),
+      authorization: new Headers(init.headers).get('authorization'),
+      search: new URL(url).search,
       body: init.body ? JSON.parse(String(init.body)) : undefined,
     };
     requests.push(request);
@@ -214,7 +220,12 @@ export function fakeKirora(
         const lastSeenAt = new Date(Date.UTC(2026, 10, 1, 0, 0, registrations));
         return (
           registrationAnswer?.(request) ??
-          Response.json({ data: { lastSeenAt: lastSeenAt.toISOString() } })
+          Response.json({
+            data: {
+              lastSeenAt: lastSeenAt.toISOString(),
+              deviceSecret: `secret-${registrations}`,
+            },
+          })
         );
       }
       return new Response(null, { status: 204 });

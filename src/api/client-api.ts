@@ -97,7 +97,13 @@ export class ClientApi {
     }
     await this.identity.tokenReady(user);
     const sentToken = user.token;
-    const answer = await this.send(this.apiUrl, method, path, sentToken, options);
+    const answer = await this.send(
+      this.apiUrl,
+      method,
+      path,
+      `Bearer ${sentToken}`,
+      options,
+    );
     if (answer !== REFUSED) {
       return this.accepted(user, answer as Data | undefined);
     }
@@ -105,12 +111,45 @@ export class ClientApi {
     // Kirora refused the token: get a fresh one, once, and try again with it.
     const freshToken = await this.identity.refresh(user, sentToken);
     if (freshToken) {
-      const retried = await this.send(this.apiUrl, method, path, freshToken, options);
+      const retried = await this.send(
+        this.apiUrl,
+        method,
+        path,
+        `Bearer ${freshToken}`,
+        options,
+      );
       if (retried !== REFUSED) {
         return this.accepted(user, retried as Data | undefined);
       }
     }
     throw refusal();
+  }
+
+  /**
+   * Sends with a device secret (`Authorization: Device <secret>`) instead of a user's
+   * token: for detaching a device with nobody signed in. There's no token to refresh, so
+   * a 401 is final.
+   */
+  async requestWithSecret<Data>(
+    method: 'DELETE',
+    path: string,
+    deviceSecret: string,
+    options: Omit<RequestOptions, 'as'> = {},
+  ): Promise<Data | undefined> {
+    if (this.apiUrl === undefined) {
+      throw new KiroraError(this.urlProblem!);
+    }
+    const answer = await this.send(
+      this.apiUrl,
+      method,
+      path,
+      `Device ${deviceSecret}`,
+      options,
+    );
+    if (answer === REFUSED) {
+      throw refusal();
+    }
+    return answer as Data | undefined;
   }
 
   /** A 2xx answer: Kirora took `user`'s token. */
@@ -128,7 +167,7 @@ export class ClientApi {
     apiUrl: string,
     method: string,
     path: string,
-    userToken: string,
+    authorization: string,
     options: RequestOptions,
   ): Promise<unknown> {
     // AbortSignal.timeout() and AbortSignal.any() are newer than the browsers we support,
@@ -143,7 +182,7 @@ export class ClientApi {
     const url = `${apiUrl}/client/v1${path}`;
     const request: RequestInit = {
       method,
-      headers: this.headers(userToken, options.body !== undefined),
+      headers: this.headers(authorization, options.body !== undefined),
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: abort.signal,
     };
@@ -164,9 +203,9 @@ export class ClientApi {
     }
   }
 
-  private headers(userToken: string, hasBody: boolean): Record<string, string> {
+  private headers(authorization: string, hasBody: boolean): Record<string, string> {
     const headers: Record<string, string> = {
-      authorization: `Bearer ${userToken}`,
+      authorization,
       'kirora-client-key': this.clientKey,
       'kirora-sdk': SDK_NAME,
     };

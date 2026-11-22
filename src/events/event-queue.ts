@@ -262,8 +262,33 @@ export class EventQueue {
     );
   }
 
-  clearAll(): Promise<void> {
-    return this.keep(() => false);
+  /** The idempotency keys of the events waiting from before sign-in, as of now. */
+  unboundKeys(): Promise<Set<string>> {
+    return this.inTurn(() => {
+      const keys = new Set<string>();
+      for (const stored of this.read()) {
+        if (stored.owner === null) {
+          keys.add(stored.event.idempotencyKey);
+        }
+      }
+      return keys;
+    });
+  }
+
+  /** Forgets those of `keys` still waiting from before sign-in; adopted ones stay. */
+  removeUnbound(keys: ReadonlySet<string>): Promise<void> {
+    if (keys.size === 0) {
+      return Promise.resolve();
+    }
+    return this.keep(
+      (stored) => stored.owner !== null || !keys.has(stored.event.idempotencyKey),
+    );
+  }
+
+  /** Forgets every event, and the count of writes kept beside them: nothing is left. */
+  async clearAll(): Promise<void> {
+    await this.keep(() => false);
+    this.storage.removeItem(this.revisionKey);
   }
 
   /**
@@ -398,6 +423,12 @@ export class EventQueue {
    * tab made (see `readRevision`), runs `operation`, and records its write's revision.
    */
   private async caughtUpThen<Result>(operation: () => Result): Promise<Result> {
+    // A page fallen back to memory neither sees other tabs' writes nor shares its own:
+    // there's nothing to catch up with.
+    if (this.storage.persistent === false) {
+      return operation();
+    }
+
     const latest = await readRevision(this.key).catch(() => undefined);
     if (latest === undefined) {
       // Without IndexedDB (some private windows) nothing says which write to wait for.
@@ -434,7 +465,11 @@ export class EventQueue {
 
     const giveUpAt = Date.now() + MAX_CATCH_UP_MS;
     const runIfCaughtUp = (latest: number) => {
-      const behind = this.revision() < latest && Date.now() < giveUpAt;
+      // A page fallen back to memory has nothing to catch up with, as above.
+      const behind =
+        this.storage.persistent !== false &&
+        this.revision() < latest &&
+        Date.now() < giveUpAt;
       if (behind) {
         return undefined;
       }

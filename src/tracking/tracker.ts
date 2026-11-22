@@ -41,6 +41,11 @@ type TrackerDependencies = {
 export class Tracker {
   /** True while `beforeSend` runs, so tracking from inside it is refused. */
   private inBeforeSend = false;
+  /**
+   * True from a sign-out in this tab until the next sign-in: activity meanwhile is no one's,
+   * and never continues another user's live session, as it would on a page load.
+   */
+  private signedOutHere = false;
 
   constructor(private readonly parts: TrackerDependencies) {}
 
@@ -69,7 +74,7 @@ export class Tracker {
   keepSessionAlive(): void {
     this.safely(() => {
       if (this.sessionsOn) {
-        sessions.keepSessionAlive(this.sessionStore, this.owner());
+        sessions.keepSessionAlive(this.sessionStore, this.owner(), !this.signedOutHere);
       }
     });
   }
@@ -79,6 +84,9 @@ export class Tracker {
    * no owner, ends every session.
    */
   endSession(owner?: string): void {
+    if (owner !== undefined) {
+      this.signedOutHere = true;
+    }
     this.safely(() => sessions.endSession(this.sessionStore, owner));
   }
 
@@ -142,7 +150,10 @@ export class Tracker {
       return undefined;
     }
 
-    const session = sessions.touchSession(this.sessionStore, owner);
+    if (owner !== null) {
+      this.signedOutHere = false;
+    }
+    const session = sessions.touchSession(this.sessionStore, owner, !this.signedOutHere);
     if (session.started) {
       page ??= pageContext();
       const properties = sessionStartedProperties(page);

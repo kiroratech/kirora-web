@@ -227,7 +227,9 @@ export class EventDelivery {
     while (mayStillSend()) {
       const hidden = isPageHidden();
       // Read at once while hidden: the page may be going away.
-      const oldest = await this.queue.oldest(maxEvents, user.subject, hidden);
+      // Past those already on their way in another send, which this one leaves to it.
+      const wanted = maxEvents + this.inFlight.size;
+      const oldest = await this.queue.oldest(wanted, user.subject, hidden);
       // Marked as on their way in the same step, before another send can read them.
       const { batch, bytes } = this.nextBatch(oldest, hidden);
 

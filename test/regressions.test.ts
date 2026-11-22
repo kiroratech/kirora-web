@@ -13,6 +13,7 @@ import {
   tokenFor,
   userOf,
 } from './fake-kirora.js';
+import { stubIndexedDB } from './fake-indexeddb.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -527,4 +528,90 @@ it('keeps at most three sessions, the most recently active, so the cookie stays 
   expect(Object.keys(stored)).toHaveLength(3);
   // Ada, the least recently active, made room: her next activity starts a new session.
   expect(touchSession(store, 'ada').sessionId).not.toBe(first.sessionId);
+});
+
+it('sends an event tracked as the page hides, past a full batch already on its way', async () => {
+  stubLocalStorage();
+  const bodies: string[] = [];
+  // Never answered: the page is going away.
+  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
+    bodies.push(String(init.body));
+    return new Promise(() => undefined);
+  });
+  const kirora = client();
+  await kirora.identify(tokenFor('ada'));
+
+  // 150 events: the first 100 go in one batch, which never comes back.
+  for (let index = 0; index < 150; index++) {
+    kirora.track(`Viewed ${index}`);
+  }
+  await vi.waitFor(() => expect(bodies).toHaveLength(1));
+
+  vi.stubGlobal('document', { visibilityState: 'hidden' });
+  kirora.track('Page Hidden');
+  await vi.waitFor(() => expect(bodies).toHaveLength(2));
+  expect(bodies[1]).toContain('Page Hidden');
+  kirora.destroy();
+});
+
+it("starts a visit of its own after a logout, never continuing another tab's user's", async () => {
+  stubLocalStorage();
+  const server = fakeKirora();
+  const yaraTab = client({ trackSessions: true });
+  const xavierTab = client({ trackSessions: true });
+
+  await yaraTab.identify(tokenFor('yara'));
+  yaraTab.track('Report Exported');
+  await yaraTab.flush();
+  const yaraSession = sentEvents(server.handled).find(
+    ({ name }) => name === 'Report Exported',
+  )!.sessionId;
+
+  await xavierTab.identify(tokenFor('xavier'));
+  await xavierTab.logout();
+  xavierTab.track('After Logout');
+  await vi.waitFor(() =>
+    expect(localStorage.getItem(QUEUE_KEY)).toContain('After Logout'),
+  );
+
+  const queued = JSON.parse(localStorage.getItem(QUEUE_KEY)!) as {
+    event: { name: string; context: { sessionId?: string } };
+  }[];
+  const afterLogout = queued.find(({ event }) => event.name === 'After Logout')!;
+  expect(afterLogout.event.context.sessionId).toBeDefined();
+  expect(afterLogout.event.context.sessionId).not.toBe(yaraSession);
+  yaraTab.destroy();
+  xavierTab.destroy();
+});
+
+it('leaves no count of writes behind once the queue is cleared for good', async () => {
+  // Without Web Locks, so the IndexedDB lock, which records the count, is used.
+  vi.stubGlobal('navigator', {});
+  stubIndexedDB();
+  const storage = memoryStorage();
+  const queue = new EventQueue(storage, 'workspace');
+  await queue.add(
+    { idempotencyKey: 'a', name: 'A', properties: {}, occurredAt: '', context: {} },
+    null,
+  );
+  await queue.clearAll();
+  expect(storage.getItem('kirora:events:workspace')).toBeNull();
+  expect(storage.getItem('kirora:events:workspace:revision')).toBeNull();
+});
+
+it('never gives the next user the events of one who signed out without identify()', async () => {
+  stubLocalStorage();
+  const sent = recordSends();
+  // A reload where the app restored its own session: tracked, but never identified.
+  const kirora = client();
+  kirora.track('Report Exported');
+  await vi.waitFor(() =>
+    expect(localStorage.getItem(QUEUE_KEY)).toContain('Report Exported'),
+  );
+
+  await kirora.logout();
+  await kirora.identify(tokenFor('bob'));
+  await kirora.flush();
+  expect(sent.map(({ name }) => name)).not.toContain('Report Exported');
+  kirora.destroy();
 });
