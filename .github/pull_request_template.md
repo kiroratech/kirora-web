@@ -6,5 +6,5 @@
 
 - [ ] Tests added or updated
 - [ ] `pnpm lint`, `pnpm typecheck`, `pnpm test` and `pnpm format:check` pass
-- [ ] README updated, if public behaviour changed
-- [ ] Changeset added (`pnpm changeset`), if users will notice the change (after the first release)
+- [ ] README and `docs/` guides updated, if public behaviour changed
+- [ ] `CHANGELOG.md` updated under `Unreleased`, if users will notice the change

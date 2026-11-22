@@ -31,16 +31,17 @@ export function holdSignedIn(namespace: string, subject: string): () => void {
 }
 
 /**
- * Whether another tab has `subject` signed in: true or false, or undefined where it
- * can't be told (no Web Locks, before Firefox 96 and Safari 15.4, or refused).
+ * Whether another tab is known to have `subject` signed in. False where it can't be told
+ * (no Web Locks, before Firefox 96 and Safari 15.4, or refused): a browser that may be
+ * signed out had better stop getting their pushes than keep them.
  */
 export async function signedInElsewhere(
   namespace: string,
   subject: string,
-): Promise<boolean | undefined> {
+): Promise<boolean> {
   const locks = webLocks();
   if (!locks) {
-    return undefined;
+    return false;
   }
 
   try {
@@ -48,6 +49,6 @@ export async function signedInElsewhere(
     const name = lockName(namespace, subject);
     return held.some((lock) => lock.name === name);
   } catch {
-    return undefined;
+    return false;
   }
 }

@@ -61,9 +61,10 @@ tracked while it runs go as whoever signs in next.
 **With nobody signed in** (a reload where your app restored its session but `identify()`
 hasn't run yet), `logout()` still detaches this browser from push, using a secret the
 browser made and sent with its registration. It leaves the registration alone while its
-user is signed in in another tab, or where it can't tell (browsers without Web Locks:
-before Firefox 96 and Safari 15.4). It drops only the waiting events tracked during a
-signed-in user's visit; a visitor who never signed in keeps theirs, for when they sign up.
+user is signed in in another tab. Browsers without Web Locks (before Firefox 96 and Safari
+15.4) can't tell, so there it detaches anyway: a tab still signed in gets push back at its
+next `identify()`. It drops only the waiting events tracked during a signed-in user's
+visit; a visitor who never signed in keeps theirs, for when they sign up.
 
 **If Kirora can't be reached**, the SDK cancels the browser's push subscription at once,
 which stops pushes, and keeps retrying the detachment in the background for up to a day,

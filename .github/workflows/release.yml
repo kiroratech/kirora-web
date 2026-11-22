@@ -1,40 +1,60 @@
 name: Release
 
-# Run by hand only until the first release: on a push to main, changesets would publish
-# the package to npm. Put the push trigger back when it's time to release.
+# Publishes package.json's version when it isn't on npm yet, after a merge to main that
+# bumps it. scripts/release-plan.mjs decides whether to publish, and under which dist-tag.
+# No tag trigger: a tag can point at a commit that never reached main.
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
 
-concurrency: ${{ github.workflow }}-${{ github.ref }}
+permissions:
+  contents: read
+  # Lets npm authenticate with GitHub's OIDC token (trusted publishing), so no npm token
+  # is stored here.
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  check:
-    uses: ./.github/workflows/ci.yml
-
-  release:
-    # Nothing is published unless every check passes on this commit.
-    needs: check
+  publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-      # For npm provenance.
-      id-token: write
+    environment: npm
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Trusted publishing needs npm 11.5.1 or later, which Node 24 ships with.
           node-version: 24
-          cache: pnpm
+          # No cache: a cache another workflow wrote could change what gets published.
           registry-url: https://registry.npmjs.org
-      - run: pnpm install --frozen-lockfile
-      # Opens a "Version packages" PR from the changesets, and publishes once it's merged.
-      - uses: changesets/action@v2
-        with:
-          version-script: pnpm changeset version
-          publish-script: pnpm release
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-        env:
-          # Read by the .npmrc that setup-node writes for registry-url.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Decide whether and where to publish
+        id: plan
+        # Fails if npm can't be reached, rather than taking that for "not published yet".
+        run: node scripts/release-plan.mjs
+      - if: steps.plan.outputs.publish == 'true'
+        run: pnpm install --frozen-lockfile
+      - if: steps.plan.outputs.publish == 'true'
+        run: pnpm lint
+      - if: steps.plan.outputs.publish == 'true'
+        run: pnpm typecheck
+      - if: steps.plan.outputs.publish == 'true'
+        run: pnpm test
+      # Pack once (building through `prepack`), check that tarball as a user would install
+      # it, then publish the same file.
+      - if: steps.plan.outputs.publish == 'true'
+        name: Pack
+        run: |
+          pnpm pack --pack-destination release
+          echo "KIRORA_TARBALL=$(ls release/*.tgz)" >> "$GITHUB_ENV"
+      - if: steps.plan.outputs.publish == 'true'
+        run: pnpm size
+      - if: steps.plan.outputs.publish == 'true'
+        run: pnpm check:package
+      - if: steps.plan.outputs.publish == 'true'
+        run: npm publish ./release/*.tgz --tag ${{ steps.plan.outputs.dist-tag }}
