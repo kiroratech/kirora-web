@@ -9,8 +9,12 @@ const SESSION_TIMEOUT_MS = 30 * 60_000;
 /** How often a visible page keeps its session alive: well inside the timeout. */
 export const SESSION_KEEPALIVE_MS = 5 * 60_000;
 
-/** At most this many live sessions are kept: one per user active in this browser. */
-const MAX_SESSIONS = 5;
+/**
+ * At most this many live sessions are kept, the most recently active: one per user active
+ * in this browser. Enough for two people sharing a device and a visit begun before
+ * sign-in, while keeping the cookie, which goes with every request to the site, small.
+ */
+const MAX_SESSIONS = 3;
 /** The key of a session begun before anyone signed in. */
 const NO_ONE = '';
 

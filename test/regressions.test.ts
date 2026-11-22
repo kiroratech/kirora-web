@@ -510,3 +510,21 @@ it('keeps the visit begun as the page loaded alive once the user signs in', asyn
   endSession(store, 'ada');
   expect(touchSession(store, null).started).toBe(true);
 });
+
+it('keeps at most three sessions, the most recently active, so the cookie stays small', async () => {
+  const { touchSession } = await import('../src/tracking/session.js');
+  const storage = memoryStorage();
+  const store = { storage, key: 'kirora:session:test' };
+  vi.useFakeTimers({ toFake: ['Date'] });
+
+  const first = touchSession(store, 'ada');
+  for (const user of ['bob', 'carol', 'dave']) {
+    vi.advanceTimersByTime(1_000);
+    touchSession(store, user);
+  }
+
+  const stored = JSON.parse(storage.getItem(store.key)!) as Record<string, unknown>;
+  expect(Object.keys(stored)).toHaveLength(3);
+  // Ada, the least recently active, made room: her next activity starts a new session.
+  expect(touchSession(store, 'ada').sessionId).not.toBe(first.sessionId);
+});
