@@ -26,7 +26,9 @@ function loaderSnippet(options: KiroraOptions, calls: [string, ...unknown[]][]) 
     logout: queue('logout'),
     track: queue('track'),
   });
-  for (const [method, ...args] of calls) snippet.push([method, args, held()]);
+  for (const [method, ...args] of calls) {
+    snippet.push([method, args, held()]);
+  }
   return snippet;
 }
 

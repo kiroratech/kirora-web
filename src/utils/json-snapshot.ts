@@ -19,19 +19,27 @@ export function jsonSnapshot(value: unknown): unknown {
       return item;
     }
     if (typeof item === 'number') {
-      if (Number.isFinite(item)) return item;
+      if (Number.isFinite(item)) {
+        return item;
+      }
       throw new NotJsonError('a number JSON has no form for');
     }
     // undefined (in an array), a function, a symbol or a bigint.
     if (typeof item !== 'object') {
       throw new NotJsonError(`a value of type ${typeof item}`);
     }
-    if (ancestors.has(item)) throw new NotJsonError('a circular reference');
+    if (ancestors.has(item)) {
+      throw new NotJsonError('a circular reference');
+    }
     ancestors.add(item);
     try {
-      if (Array.isArray(item)) return Array.from(item, copy);
+      if (Array.isArray(item)) {
+        return Array.from(item, copy);
+      }
       const { toJSON } = item as { toJSON?: unknown };
-      if (typeof toJSON === 'function') return copy((toJSON as () => unknown).call(item));
+      if (typeof toJSON === 'function') {
+        return copy((toJSON as () => unknown).call(item));
+      }
       // A class instance, or a plain object from another frame, is its own fields. A
       // built-in such as a Map, Set, RegExp or typed array would be lost or garbled.
       if (Object.prototype.toString.call(item) !== '[object Object]') {

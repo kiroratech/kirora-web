@@ -87,8 +87,31 @@ it('waits for identify() before calls that need the user', async () => {
   answerTokenFetch('token-for-ada');
   await Promise.all([identified, consented, loggedOut]);
 
-  expect(calls).toEqual([
+  // Both as Ada, before she signs out; in either order.
+  expect([...calls].sort()).toEqual([
     'POST /client/v1/events/batch Bearer token-for-ada',
     'PUT /client/v1/push-consent Bearer token-for-ada',
   ]);
 });
+
+it.each([null, undefined, ''])(
+  'counts a fetchUserToken answering %j as a failed fetch, sending nothing',
+  async (answer) => {
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+      requests.push(`${init.method} ${new URL(url).pathname}`);
+      return Promise.resolve(accepted(init.body));
+    });
+    const kirora = new Kirora({
+      clientKey: 'kirora_pk_test',
+      trackSessions: false,
+      logLevel: 'none',
+      fetchUserToken: () => Promise.resolve(answer),
+    });
+    kirora.track('Plan Upgraded');
+
+    await expect(kirora.identify()).rejects.toMatchObject({ name: 'UserTokenError' });
+    await kirora.flush();
+    expect(requests).toEqual([]);
+  },
+);

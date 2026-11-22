@@ -12,7 +12,9 @@ const REMOVED = '';
  * instead of sharing it again.
  */
 export function siteStorage(device: KeyValueStorage): KeyValueStorage {
-  if (typeof document === 'undefined') return device;
+  if (typeof document === 'undefined') {
+    return device;
+  }
   // Worked out on first write, so no cookie is set before consent.
   let domain: { value: string | undefined } | undefined;
   const write = (key: string, value: string) => {
@@ -38,10 +40,14 @@ export function siteStorage(device: KeyValueStorage): KeyValueStorage {
         device.removeItem(key);
         return null;
       }
-      if (shared !== null) return shared;
+      if (shared !== null) {
+        return shared;
+      }
       // The cookie is missing (blocked or cleared): copy the device's value over.
       const own = device.getItem(key);
-      if (own !== null) write(key, own);
+      if (own !== null) {
+        write(key, own);
+      }
       return own;
     },
     setItem: (key, value) => {
@@ -75,7 +81,9 @@ function readCookie(name: string): string | null {
   }
   for (const pair of cookies.split('; ')) {
     const separator = pair.indexOf('=');
-    if (pair.slice(0, separator) !== name) continue;
+    if (pair.slice(0, separator) !== name) {
+      continue;
+    }
     try {
       return decodeURIComponent(pair.slice(separator + 1));
     } catch {

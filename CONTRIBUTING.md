@@ -54,6 +54,10 @@ pnpm check:consumers # installs the packed tarball with npm, Yarn and pnpm, and 
 `pnpm build` writes `dist/index.js` (ES module), `dist/kirora.min.js` (script tag build),
 `dist/kirora-sw.js` and the type declarations, with source maps.
 
+`pnpm size` holds the two page bundles to a fixed 20 kB (brotli) ceiling and the service
+worker to 1.7 kB. The SDK loads on customers' pages, so a change that would cross the
+ceiling wins its bytes back elsewhere; raising it is a decision, not a fix.
+
 `test/api.test.ts` runs against a real Kirora API when `KIRORA_API_URL`,
 `KIRORA_CLIENT_KEY` and `KIRORA_TOKEN_SECRET` are set, and is skipped otherwise.
 

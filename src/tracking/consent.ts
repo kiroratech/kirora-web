@@ -36,7 +36,9 @@ export class TrackingConsent {
 
   get allowed(): boolean {
     const answer = this.current();
-    if (answer === 'unknown') return false;
+    if (answer === 'unknown') {
+      return false;
+    }
     return this.required ? answer === 'granted' : answer !== 'refused';
   }
 
@@ -53,8 +55,11 @@ export class TrackingConsent {
     this.given = answer;
     const grantSaved = !granted && this.storage.getItem(this.key) === 'granted';
     // The copy first, as every SDK does.
-    if (granted) this.storage.removeItem(this.refusalKey);
-    else this.storage.setItem(this.refusalKey, answer);
+    if (granted) {
+      this.storage.removeItem(this.refusalKey);
+    } else {
+      this.storage.setItem(this.refusalKey, answer);
+    }
     this.storage.setItem(this.key, answer);
     if (grantSaved && !this.storage.persistent) {
       // The refusal only reached memory, so the grant saved before would come back on
@@ -77,18 +82,26 @@ export class TrackingConsent {
    * be read and isn't safe to assume.
    */
   private current(): Answer | null | 'unknown' {
-    if (!this.storage.readable) return this.given ?? 'unknown';
+    if (!this.storage.readable) {
+      return this.given ?? 'unknown';
+    }
     const stored = this.storage.getItem(this.key);
     const copy = this.storage.getItem(this.refusalKey);
     // Reading may have just failed.
-    if (!this.storage.readable) return this.given ?? 'unknown';
-    if (stored === 'refused' || copy === 'refused') return 'refused';
+    if (!this.storage.readable) {
+      return this.given ?? 'unknown';
+    }
+    if (stored === 'refused' || copy === 'refused') {
+      return 'refused';
+    }
     if (stored === 'granted') {
       // Once writes fail, only a grant given to this client counts: one saved before may
       // be out of date. Ignored, not deleted, since reading changes nothing.
       return this.storage.persistent || this.given !== null ? 'granted' : null;
     }
-    if (stored === null) return null;
+    if (stored === null) {
+      return null;
+    }
     // Garbled, and the copy holds no refusal: a fresh start, but never an assumed grant.
     if (!this.toldUnreadable) {
       this.toldUnreadable = true;

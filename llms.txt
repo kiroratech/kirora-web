@@ -2,14 +2,15 @@
 
 > Kirora's browser SDK: tracks what signed-in users do (events, page views, sessions),
 > records tracking consent, and registers browsers for web push. This file tells an AI
-> coding agent how to install it in a customer's web app. Follow the steps in order and
+> coding agent how to install it in a developer's web app. Follow the steps in order and
 > ask the developer where a step says to. Everything you need is in this file; the
 > README.md next to it is the full reference.
 
 ## Before you start: what you need from the developer
 
-- The **client key** (`kirora_pk_…`). Public; goes in client code.
-- The **token secret**. Private; server only. Never put it in client code, a public env var
+- The **client key** (`kirora_pk_…`, shown as **Public key** under Developer → SDK).
+  Public; goes in client code.
+- The **SDK token secret** (shown as **Secret key** there). Private; server only. Never put it in client code, a public env var
   (`NEXT_PUBLIC_*`, `VITE_*`, `PUBLIC_*`, `NUXT_PUBLIC_*`), or source control.
 - How the app knows who is signed in on the server (its session or auth library).
 
@@ -32,14 +33,15 @@ The SDK proves who's signed in with a short-lived token the app's server signs. 
 1. Reads the signed-in user from the app's **own session**. Never from the request body,
    query string or a header the browser controls: whoever is named gets the events.
 2. Returns 401 if nobody is signed in.
-3. Returns 500, and logs why, if the token secret isn't configured.
+3. Returns 500, and logs why, if the SDK token secret isn't configured.
 4. Otherwise returns the token as plain text.
 5. Sends `Cache-Control: no-store` on every answer, 401 included.
 
 Sign it with `createUserToken(secret, userId)` from `@kirora/node` if the project already
-uses that package. Otherwise any JWT library works: HS256 with the token secret, claims
-`sub` (the app's user id, as a string), `iat`, and `exp` at most 24 hours later (1 hour is
-usual). With no library, in a server-only module such as `lib/kirora-token.ts`:
+uses that package. Otherwise any JWT library works: HS256 with the SDK token secret, claims
+`sub` (the app's user id, as a string: Kirora's contact `externalId`, so the same id the
+app uses with Kirora's server API, if it does), `iat`, and `exp` at most 24 hours later (1
+hour is usual). With no library, in a server-only module such as `lib/kirora-token.ts`:
 
     import { createHmac } from 'node:crypto';
 
@@ -163,14 +165,21 @@ returns within 5 seconds, so it can't block signing out; no try/catch is needed.
 library call like Auth.js `signOut()`, make the sign-out button a client component that
 awaits `kirora.logout()` first, then calls the action or submits the form. If a session
 ends some other way (expiry, another tab), nothing else is needed: the next `identify()`
-takes over and the previous user's unsent events are never sent as the new one.
+takes over and the previous user's unsent events are never sent as the new one. Make sure
+`identify()` runs on every page load while signed in, including when the app restores its
+own session: `logout()` then drops the events from before sign-in and detaches the
+browser (with nobody identified, by a device secret the SDK sends at registration).
+Call `logout()` only from the app's sign-out, never on pages where nobody is signed in.
 
 ## Step 5: track events
 
     kirora.track('Plan Upgraded', { plan: 'pro', seats: 5 });
 
-Names: object then past-tense action, Title Case (`Order Completed`, `Invoice Paid`).
-Details go in properties, not the name. Never start a name with `contact.`. Properties
+Names: object then past-tense action, Title Case (`Order Completed`, `Payment Succeeded`,
+`Signed Up`), at most 128 characters; prefer Kirora's standard names where they fit.
+Details go in properties (at most 16 KB, keys up to 64 characters), not the name. Never
+start a name with `contact.`, and never send `Ordered Product`, `Session Started` or
+`Page Viewed` yourself. Properties
 must be JSON (no functions, `NaN`, `Map`s or circular objects), or the event is dropped.
 Don't add tracking calls the developer didn't ask for, beyond page views.
 
@@ -210,7 +219,10 @@ and pass its id as `push: { pushAppId: '…' }`; otherwise `push: true` is enoug
      set `push: { serviceWorkerUrl: '/<their worker>.js' }`. If the worker is generated
      (next-pwa, Serwist, Workbox), use that tool's option for importing extra scripts. If
      it's a module worker (`type: 'module'`), stop and tell the developer: `importScripts`
-     doesn't work there.
+     doesn't work there. If the existing worker has its own `push` or `notificationclick`
+     handlers that act on every event, make them return early for Kirora's
+     (a push whose JSON has `kirora: 'true'`, read in a try/catch; a click with `event.notification.data?.kirora`), or a push
+     shows twice.
 3. Asking for permission needs a click from a signed-in user. Ask the developer where the
    prompt belongs (e.g. account settings, after onboarding); if they have no preference,
    add one small "Enable notifications" button in a signed-in area and tell them:

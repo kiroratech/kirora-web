@@ -31,7 +31,9 @@ async function pageWithWorker() {
   registration.active.postMessage = (message: unknown) => asked.push(message);
   let onMessage: ((event: { data: unknown }) => void) | undefined;
   container.addEventListener = (type: string, listener: typeof onMessage) => {
-    if (type === 'message') onMessage = listener;
+    if (type === 'message') {
+      onMessage = listener;
+    }
   };
   container.removeEventListener = () => (onMessage = undefined);
   const workerSays = (data: unknown) => onMessage?.({ data });

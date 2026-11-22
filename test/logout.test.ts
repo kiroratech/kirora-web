@@ -41,10 +41,14 @@ function kiroraWith(
       `${call.method} ${call.path.replace(/\/devices\/.+/, '/devices')} ${call.user}`,
     );
     const answer = override(call) ?? fake(url, init);
-    if (call.method !== 'PUT' || !call.path.startsWith('/devices/')) return answer;
+    if (call.method !== 'PUT' || !call.path.startsWith('/devices/')) {
+      return answer;
+    }
     return answer.then(async (response) => {
       const body = (await response.clone().json()) as { data?: { lastSeenAt?: string } };
-      if (body.data?.lastSeenAt) registered.set(call.user, body.data.lastSeenAt);
+      if (body.data?.lastSeenAt) {
+        registered.set(call.user, body.data.lastSeenAt);
+      }
       return response;
     });
   });
@@ -169,8 +173,9 @@ it('names the last registration when detaching', async () => {
   stubIndexedDB();
   let named: [string | null, string | undefined] | undefined;
   kiroraWith((call) => {
-    if (call.method === 'DELETE')
+    if (call.method === 'DELETE') {
       named = [call.lastSeenAt, call.registered.get(call.user)];
+    }
     return undefined;
   });
   const kirora = pushClient();
@@ -187,7 +192,9 @@ it("stops A's late detach once A registers again, and keeps the subscription", a
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   let offline = true;
   const calls = kiroraWith((call) => {
-    if (call.method !== 'DELETE') return undefined;
+    if (call.method !== 'DELETE') {
+      return undefined;
+    }
     return offline ? unavailable() : conditionalDetach(call);
   });
   const kirora = pushClient();
@@ -211,7 +218,9 @@ it("finishes A's late detach harmlessly once B has the browser", async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   let offline = true;
   const calls = kiroraWith((call) => {
-    if (call.method !== 'DELETE') return undefined;
+    if (call.method !== 'DELETE') {
+      return undefined;
+    }
     return offline ? unavailable() : conditionalDetach(call);
   });
   const kirora = pushClient();
@@ -228,7 +237,7 @@ it("finishes A's late detach harmlessly once B has the browser", async () => {
   kirora.destroy();
 });
 
-it('refreshes the token once at logout, then stops on a refusal', async () => {
+it('refreshes the token once at logout, then goes on with the device secret, and stops when that is refused too', async () => {
   stubWebPush();
   stubIndexedDB();
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -243,7 +252,12 @@ it('refreshes the token once at logout, then stops on a refusal', async () => {
   await kirora.logout();
   await vi.advanceTimersByTimeAsync(60 * 60_000);
   expect(fetchUserToken).toHaveBeenCalledTimes(1);
-  expect(deletes(calls)).toEqual(['DELETE /devices ada', 'DELETE /devices ada']);
+  // The token, the refreshed token, then the device secret, which names no user.
+  expect(deletes(calls)).toEqual([
+    'DELETE /devices ada',
+    'DELETE /devices ada',
+    'DELETE /devices undefined',
+  ]);
   kirora.destroy();
 });
 
@@ -369,7 +383,9 @@ it('refreshes an expired token to turn push off, as the user is still signed in'
   stubIndexedDB();
   let expired = true;
   const calls = kiroraWith((call) => {
-    if (call.method !== 'DELETE' || !expired) return undefined;
+    if (call.method !== 'DELETE' || !expired) {
+      return undefined;
+    }
     expired = false;
     return Promise.resolve(new Response(null, { status: 401 }));
   });
@@ -401,9 +417,13 @@ it('schedules nothing more when destroyed while a retry is on its way', async ()
   let failRetry: (() => void) | undefined;
   let attempts = 0;
   const calls = kiroraWith((call) => {
-    if (call.method !== 'DELETE') return undefined;
+    if (call.method !== 'DELETE') {
+      return undefined;
+    }
     attempts++;
-    if (attempts === 1) return unavailable();
+    if (attempts === 1) {
+      return unavailable();
+    }
     // The retry hangs until the test lets it fail.
     return new Promise<Response>((resolve) => {
       failRetry = () => resolve(new Response(null, { status: 503 }));

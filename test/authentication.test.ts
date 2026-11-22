@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { Kirora, type AuthenticationFailure } from '../src/index.js';
+import { Kirora, type AuthenticationFailureReason } from '../src/index.js';
 import { accepted, kiroraRefusing, stubWebPush, tokenFor } from './fake-kirora.js';
 
 afterEach(() => {
@@ -13,7 +13,7 @@ const tokenExpiring = (sub: string, exp: number, variant = '', iat?: number) =>
 
 function client(options: {
   fetchUserToken?: () => Promise<string>;
-  onAuthenticationFailed?: (reason: AuthenticationFailure) => void;
+  onAuthenticationFailed?: (reason: AuthenticationFailureReason) => void;
   push?: true;
 }) {
   return new Kirora({
@@ -28,7 +28,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
 
 it('tells the app once when Kirora refuses a token it cannot replace', async () => {
   kiroraRefusing((token) => token.startsWith('expired'));
-  const failures: AuthenticationFailure[] = [];
+  const failures: AuthenticationFailureReason[] = [];
   const kirora = client({ onAuthenticationFailed: (reason) => failures.push(reason) });
   kirora.track('Plan Upgraded');
   await kirora.identify('expired-token-1');
@@ -43,16 +43,18 @@ it('tells the app once when Kirora refuses a token it cannot replace', async () 
 });
 
 it('tells the app once when fetchUserToken fails in the background, again after a success', async () => {
-  const tokens = kiroraRefusing((token) => token === 'expired-token');
+  const expired = tokenFor('ada', '-expired');
+  const fresh = tokenFor('ada', '-fresh');
+  const tokens = kiroraRefusing((token) => token === expired);
   let failing = true;
-  const failures: AuthenticationFailure[] = [];
+  const failures: AuthenticationFailureReason[] = [];
   const kirora = client({
     fetchUserToken: () =>
-      failing ? Promise.reject(new Error('offline')) : Promise.resolve('fresh-token'),
+      failing ? Promise.reject(new Error('offline')) : Promise.resolve(fresh),
     onAuthenticationFailed: (reason) => failures.push(reason),
   });
   kirora.track('Plan Upgraded');
-  await kirora.identify('expired-token');
+  await kirora.identify(expired);
   await vi.waitFor(() => expect(failures).toEqual(['fetch_failed']));
   await kirora.flush();
   await tick();
@@ -60,12 +62,12 @@ it('tells the app once when fetchUserToken fails in the background, again after 
 
   failing = false;
   await kirora.flush();
-  expect(tokens.at(-1)).toBe('fresh-token');
+  expect(tokens.at(-1)).toBe(fresh);
 });
 
 it("doesn't call it for a failure a method rejects with, or during logout()", async () => {
   kiroraRefusing((token) => token.startsWith('expired'));
-  const failures: AuthenticationFailure[] = [];
+  const failures: AuthenticationFailureReason[] = [];
   const kirora = client({
     fetchUserToken: () => Promise.reject(new Error('offline')),
     onAuthenticationFailed: (reason) => failures.push(reason),
@@ -142,7 +144,9 @@ it('asks for a fresh token as the page is shown again past the refresh time', as
     cookie: '',
     querySelector: () => null,
     addEventListener: (type: string, listener: () => void) => {
-      if (type === 'visibilitychange') listeners.push(listener);
+      if (type === 'visibilitychange') {
+        listeners.push(listener);
+      }
     },
     removeEventListener: () => undefined,
   };
@@ -161,10 +165,14 @@ it('asks for a fresh token as the page is shown again past the refresh time', as
 
   // The tab was hidden while its timer was held back, and comes back past it.
   page.visibilityState = 'hidden';
-  for (const listener of listeners) listener();
+  for (const listener of listeners) {
+    listener();
+  }
   vi.spyOn(Date, 'now').mockReturnValue((now + 590) * 1000);
   page.visibilityState = 'visible';
-  for (const listener of listeners) listener();
+  for (const listener of listeners) {
+    listener();
+  }
   expect(fetchUserToken).toHaveBeenCalledTimes(1);
   vi.restoreAllMocks();
   kirora.destroy();
@@ -194,7 +202,7 @@ it('retries a failed early refresh while the token works, telling the app only t
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   const now = Math.floor(Date.now() / 1000);
   kiroraRefusing(() => false);
-  const failures: AuthenticationFailure[] = [];
+  const failures: AuthenticationFailureReason[] = [];
   let failing = true;
   const fetchUserToken = vi.fn(() =>
     failing
@@ -224,7 +232,7 @@ it('tells the app once the token has expired and a refresh still fails', async (
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   const now = Math.floor(Date.now() / 1000);
   kiroraRefusing(() => false);
-  const failures: AuthenticationFailure[] = [];
+  const failures: AuthenticationFailureReason[] = [];
   const kirora = client({
     fetchUserToken: () => Promise.reject(new Error('offline')),
     onAuthenticationFailed: (reason) => failures.push(reason),
@@ -240,7 +248,7 @@ it('tells the app once the token has expired and a refresh still fails', async (
 
 it("doesn't call onAuthenticationFailed once destroyed", async () => {
   kiroraRefusing(() => true);
-  const failures: AuthenticationFailure[] = [];
+  const failures: AuthenticationFailureReason[] = [];
   const kirora = client({ onAuthenticationFailed: (reason) => failures.push(reason) });
   kirora.track('Plan Upgraded');
   await kirora.identify('expired-token');
@@ -260,14 +268,16 @@ it("doesn't tell the app of a failure once someone else has signed in", async ()
           resolve(response.status === 401 ? response : accepted(init.body));
       }),
   );
-  const failures: AuthenticationFailure[] = [];
+  const failures: AuthenticationFailureReason[] = [];
   const kirora = client({ onAuthenticationFailed: (reason) => failures.push(reason) });
   kirora.track('Plan Upgraded');
   await kirora.identify('alice-token');
   await vi.waitFor(() => expect(answer).not.toBeUndefined());
   answer(new Response(null, { status: 401 }));
   // Bob signs in after Alice's failure is found, before the app is told of it.
-  for (let i = 0; i < 50; i++) await Promise.resolve();
+  for (let i = 0; i < 50; i++) {
+    await Promise.resolve();
+  }
   await kirora.identify('bob-token');
   await tick();
   expect(failures).toEqual([]);
@@ -316,7 +326,7 @@ it('reports a refusal once: through identify() when it rejects for it', async ()
   // the events sent alongside are refused too, but that's the same refusal.
   stubWebPush();
   kiroraRefusing(() => true);
-  const failures: AuthenticationFailure[] = [];
+  const failures: AuthenticationFailureReason[] = [];
   const kirora = client({
     push: true,
     onAuthenticationFailed: (reason) => failures.push(reason),

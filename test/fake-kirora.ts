@@ -38,13 +38,42 @@ export function recordEvents(): SentEvent[] {
   return sent;
 }
 
+/** An event as Kirora received it, with the user it was sent as. */
+export type SentAs = { user: string | undefined; name: string; sessionId?: string };
+
+/**
+ * Stubs `fetch` with a Kirora that accepts every event, unless `answer` answers a call
+ * first: a refusal, say, or a network failure. Returns the events accepted, in order,
+ * with who each was sent as.
+ */
+export function recordSends(
+  answer?: (url: string, init: RequestInit) => Promise<Response> | undefined,
+): SentAs[] {
+  const sent: SentAs[] = [];
+  vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+    const answered = answer?.(url, init);
+    if (answered) {
+      return answered;
+    }
+    const batch = JSON.parse(String(init.body)) as { events: SentEvent[] };
+    const user = userOf(init);
+    for (const { name, context } of batch.events) {
+      sent.push({ user, name, sessionId: context.sessionId });
+    }
+    return Promise.resolve(accepted(batch));
+  });
+  return sent;
+}
+
 /** A Map-backed `Storage`. While `full()` is true, writes throw as a full quota does. */
 export function memoryStorage(full = () => false) {
   const values = new Map<string, string>();
   return {
     getItem: (key: string) => values.get(key) ?? null,
     setItem: (key: string, value: string) => {
-      if (full()) throw new DOMException('Quota exceeded', 'QuotaExceededError');
+      if (full()) {
+        throw new DOMException('Quota exceeded', 'QuotaExceededError');
+      }
       values.set(key, value);
     },
     removeItem: (key: string) => void values.delete(key),
@@ -128,6 +157,7 @@ export function stubWebPush(subscribing: Promise<void> = Promise.resolve()) {
   vi.stubGlobal('location', new URL('https://example.com/'));
   vi.stubGlobal('navigator', {
     language: 'en',
+    locks: fakeLocks(),
     serviceWorker: {
       getRegistration: () => Promise.resolve(registration),
       register: () => Promise.resolve(registration),
@@ -135,6 +165,54 @@ export function stubWebPush(subscribing: Promise<void> = Promise.resolve()) {
   });
   vi.stubGlobal('PushManager', class {});
   vi.stubGlobal('Notification', { permission: 'granted' });
+}
+
+/**
+ * Web Locks of this test's own, as Node's are shared by every test in a file: exclusive
+ * requests for a name run one at a time, and shared ones side by side, and `query()` says
+ * which are held. Unlike real Web Locks, a shared request never waits for an exclusive
+ * one, which no test needs.
+ */
+export function fakeLocks() {
+  const held = new Map<string, number>();
+  const tails = new Map<string, Promise<unknown>>();
+
+  const hold = async <Result>(name: string, operation: () => Promise<Result>) => {
+    held.set(name, (held.get(name) ?? 0) + 1);
+    try {
+      return await operation();
+    } finally {
+      const count = (held.get(name) ?? 1) - 1;
+      if (count === 0) {
+        held.delete(name);
+      } else {
+        held.set(name, count);
+      }
+    }
+  };
+
+  return {
+    /** As `navigator.locks.request(name, operation)` or `(name, options, operation)`. */
+    request<Result>(name: string, ...rest: unknown[]): Promise<Result> {
+      const operation = rest.at(-1) as () => Promise<Result>;
+      const options = (rest.length > 1 ? rest[0] : {}) as {
+        mode?: 'shared' | 'exclusive';
+      };
+
+      if (options.mode === 'shared') {
+        return hold(name, operation);
+      }
+      const previous = tails.get(name) ?? Promise.resolve();
+      const run = previous.then(() => hold(name, operation));
+      tails.set(
+        name,
+        run.catch(() => undefined),
+      );
+      return run;
+    },
+    query: () =>
+      Promise.resolve({ held: [...held.keys()].map((name) => ({ name })), pending: [] }),
+  };
 }
 
 /** The VAPID public key of the fake Kirora's push app, base64url: the bytes 1, 2, 3. */
@@ -145,6 +223,10 @@ export type SentRequest = {
   method: string;
   path: string;
   user: string | undefined;
+  /** The `Authorization` header as sent: `Bearer <token>` or `Device <secret>`. */
+  authorization: string | null;
+  /** The query string, with its `?`, or empty. */
+  search: string;
   body?: unknown;
 };
 
@@ -162,17 +244,39 @@ export function fakeKirora(
   const requests: SentRequest[] = [];
   const handled: SentRequest[] = [];
   const held: (() => void)[] = [];
+  const server = {
+    requests,
+    handled,
+    held,
+    /** Answers every held call. */
+    release: () => held.splice(0).forEach((answer) => answer()),
+    /**
+     * Set to answer a call before the usual answers (a refusal, or a rejection for a
+     * network failure); undefined lets the usual answer through. Recorded as handled.
+     */
+    answerFirst: undefined as
+      ((request: SentRequest) => Promise<Response> | undefined) | undefined,
+  };
   vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
     const request: SentRequest = {
       method: init.method ?? 'GET',
       path: new URL(url).pathname.replace('/client/v1', ''),
       user: userOf(init),
+      authorization: new Headers(init.headers).get('authorization'),
+      search: new URL(url).search,
       body: init.body ? JSON.parse(String(init.body)) : undefined,
     };
     requests.push(request);
+    const first = server.answerFirst?.(request);
+    if (first) {
+      handled.push(request);
+      return first;
+    }
     const answer = () => {
       handled.push(request);
-      if (request.path === '/events/batch') return accepted(init.body);
+      if (request.path === '/events/batch') {
+        return accepted(init.body);
+      }
       if (request.path === '/push-app') {
         return Response.json({
           data: { pushAppId: 'app_web', name: 'Web', vapidPublicKey: PUSH_APP_KEY },
@@ -188,16 +292,12 @@ export function fakeKirora(
       }
       return new Response(null, { status: 204 });
     };
-    if (!hold(request)) return Promise.resolve(answer());
+    if (!hold(request)) {
+      return Promise.resolve(answer());
+    }
     return new Promise<Response>((resolve) => held.push(() => resolve(answer())));
   });
-  return {
-    requests,
-    handled,
-    held,
-    /** Answers every held call. */
-    release: () => held.splice(0).forEach((answer) => answer()),
-  };
+  return server;
 }
 
 /** A client with push on and sessions off, logging nothing: what push tests start from. */

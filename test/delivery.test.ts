@@ -43,14 +43,18 @@ function refusingNote(batch: SentBatch, status = 400): Response {
 it('drops a batch Kirora refuses as it is, so the events behind it still go', async () => {
   let refused = false;
   const { kirora, batches } = kiroraAnswering((batch) => {
-    if (refused) return accepted(batch);
+    if (refused) {
+      return accepted(batch);
+    }
     refused = true;
     return Response.json(
       { error: { code: 'PLAN_FEATURE_UNAVAILABLE' } },
       { status: 403 },
     );
   });
-  for (let index = 0; index < 101; index++) kirora.track(`Event ${index}`);
+  for (let index = 0; index < 101; index++) {
+    kirora.track(`Event ${index}`);
+  }
 
   await kirora.identify('token-for-ada');
   await kirora.flush();
@@ -107,17 +111,21 @@ it.each([400, 422])(
   },
 );
 
-it.each([
-  ['no errors', { code: 'VALIDATION_ERROR' }],
-  [
-    'a header',
-    { code: 'VALIDATION_ERROR', errors: [{ in: 'headers', field: 'kirora-sdk' }] },
-  ],
-  ['a query', { code: 'VALIDATION_ERROR', errors: [{ in: 'query', field: 'x' }] }],
-])(
-  'keeps the events for a 400 naming %s, a problem with the request',
-  async (_, error) => {
-    let answer = 400;
+it.each(
+  [400, 422].flatMap((status) =>
+    [
+      ['no errors', { code: 'VALIDATION_ERROR' }],
+      [
+        'a header',
+        { code: 'VALIDATION_ERROR', errors: [{ in: 'headers', field: 'kirora-sdk' }] },
+      ],
+      ['a query', { code: 'VALIDATION_ERROR', errors: [{ in: 'query', field: 'x' }] }],
+    ].map(([what, error]) => [status, what, error] as const),
+  ),
+)(
+  'keeps the events for a %i naming %s, a problem with the request',
+  async (status, _, error) => {
+    let answer = status;
     const { kirora, batches } = kiroraAnswering((batch) =>
       answer === 200 ? accepted(batch) : Response.json({ error }, { status: answer }),
     );
@@ -157,7 +165,9 @@ it('skips our own backoff for a flush() that joins a send already queued by a ti
   let answerHeld: (() => void) | undefined;
   // Down for the first two sends, the second held until the test answers it.
   const { kirora, batches } = kiroraAnswering((batch) => {
-    if (batches.length === 1) return new Response(null, { status: 503 });
+    if (batches.length === 1) {
+      return new Response(null, { status: 503 });
+    }
     if (batches.length === 2) {
       return new Promise<Response>(
         (resolve) => (answerHeld = () => resolve(new Response(null, { status: 503 }))),
@@ -173,7 +183,9 @@ it('skips our own backoff for a flush() that joins a send already queued by a ti
   void kirora.flush();
   await vi.waitFor(() => expect(answerHeld).toBeDefined());
   // A full queue asks for a send that waits out the backoff; then flush() joins it.
-  for (let index = 0; index < 20; index++) kirora.track('Plan Upgraded');
+  for (let index = 0; index < 20; index++) {
+    kirora.track('Plan Upgraded');
+  }
   // Once they're queued, which is what asks for that send.
   await new Promise((resolve) => setTimeout(resolve));
   const flushed = kirora.flush();
@@ -190,7 +202,9 @@ it('goes back to full batches once a split has found the event to blame', async 
       : accepted(batch),
   );
   kirora.track('Note Saved', { note: 'invalid' });
-  for (let index = 0; index < 9; index++) kirora.track('Plan Compared');
+  for (let index = 0; index < 9; index++) {
+    kirora.track('Plan Compared');
+  }
 
   await kirora.identify('token-for-ada');
   await kirora.flush();
@@ -226,7 +240,9 @@ it('sends a batch too large for Kirora in halves, dropping only the event to bla
 it('keeps each batch under the size Kirora takes', async () => {
   const { kirora, batches } = kiroraAnswering((batch) => accepted(batch));
   const large = { text: 'x'.repeat(30_000) };
-  for (let index = 0; index < 10; index++) kirora.track('Document Saved', large);
+  for (let index = 0; index < 10; index++) {
+    kirora.track('Document Saved', large);
+  }
 
   await kirora.identify('token-for-ada');
   await kirora.flush();
@@ -259,7 +275,9 @@ it("waits out Kirora's Retry-After, whatever else asks to send", async () => {
   expect(batches).toHaveLength(1);
 
   // More events, a manual flush, coming back online: none may send before 120 seconds.
-  for (let index = 0; index < 25; index++) kirora.track(`Event ${index}`);
+  for (let index = 0; index < 25; index++) {
+    kirora.track(`Event ${index}`);
+  }
   await kirora.flush();
   await vi.advanceTimersByTimeAsync(119_000);
   expect(batches).toHaveLength(1);
@@ -395,19 +413,24 @@ it("lets go of a refused answer's body before trying again with a fresh token", 
   const kirora = new Kirora({
     clientKey: 'kirora_pk_test',
     trackSessions: false,
-    fetchUserToken: () => Promise.resolve('fresh-token'),
+    fetchUserToken: () => Promise.resolve(tokenFor('ada', '-fresh')),
   });
   kirora.track('Invoice Paid');
-  await kirora.identify('expired-token');
+  await kirora.identify(tokenFor('ada', '-expired'));
   await kirora.flush();
-  expect(tokens).toEqual(['Bearer expired-token', 'Bearer fresh-token']);
+  expect(tokens).toEqual([
+    `Bearer ${tokenFor('ada', '-expired')}`,
+    `Bearer ${tokenFor('ada', '-fresh')}`,
+  ]);
   expect(cancelled).toBe(true);
 });
 
 it.each([408, 425])('keeps a batch answered %i, to retry it', async (status) => {
   let answered = false;
   const { kirora, batches } = kiroraAnswering((batch) => {
-    if (answered) return accepted(batch);
+    if (answered) {
+      return accepted(batch);
+    }
     answered = true;
     return new Response(null, { status });
   });
@@ -421,8 +444,9 @@ it.each([408, 425])('keeps a batch answered %i, to retry it', async (status) => 
 it('sends an event once when the same user is identified again while it is on its way', async () => {
   let answerFirst: () => void = () => undefined;
   const { kirora, batches } = kiroraAnswering(async (batch) => {
-    if (batches.length === 1)
+    if (batches.length === 1) {
       await new Promise<void>((resolve) => (answerFirst = resolve));
+    }
     return accepted(batch);
   });
   await kirora.identify(tokenFor('ada'));
@@ -453,7 +477,9 @@ it('sends nothing more after a refused token it cannot replace, until identify()
   expect(tokens).toEqual(['expired-token']);
 
   // Neither the timer, a full queue nor a flush asks Kirora again with the same token.
-  for (let index = 0; index < 25; index++) kirora.track(`Event ${index}`);
+  for (let index = 0; index < 25; index++) {
+    kirora.track(`Event ${index}`);
+  }
   await kirora.flush();
   expect(tokens).toHaveLength(1);
 
@@ -481,7 +507,9 @@ it('sends at once as the page is hidden, without waiting for a lock granted too 
   kirora.track('Checkout Left');
   void kirora.flush();
   // Microtasks only, as before the page is torn down.
-  for (let index = 0; index < 20; index++) await Promise.resolve();
+  for (let index = 0; index < 20; index++) {
+    await Promise.resolve();
+  }
   expect(batches.flatMap(names)).toEqual(['Checkout Left']);
   kirora.destroy();
 });
@@ -502,7 +530,9 @@ it("doesn't wait for a send on its way as the page is hidden, nor send its event
   vi.stubGlobal('document', { visibilityState: 'hidden' });
   kirora.track('Checkout Left');
   void kirora.flush();
-  for (let index = 0; index < 20; index++) await Promise.resolve();
+  for (let index = 0; index < 20; index++) {
+    await Promise.resolve();
+  }
   expect(batches.map(names)).toEqual([['Plan Compared'], ['Checkout Left']]);
 
   answerFirst();

@@ -3,7 +3,9 @@
  * if it's missing, malformed or already past. Shared by the page and the service worker.
  */
 export function retryAfterMs(header: string | null): number | undefined {
-  if (!header?.trim()) return undefined;
+  if (!header?.trim()) {
+    return undefined;
+  }
   const seconds = Number(header);
   const delayMs = Number.isNaN(seconds)
     ? Date.parse(header) - Date.now()

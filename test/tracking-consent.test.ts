@@ -285,15 +285,21 @@ function faultyStorage() {
   const removed: string[] = [];
   vi.stubGlobal('localStorage', {
     getItem: (key: string) => {
-      if (faults.read) throw new DOMException('Blocked', 'SecurityError');
+      if (faults.read) {
+        throw new DOMException('Blocked', 'SecurityError');
+      }
       return disk.getItem(key);
     },
     setItem: (key: string, value: string) => {
-      if (faults.write(key)) throw new DOMException('Failed', 'UnknownError');
+      if (faults.write(key)) {
+        throw new DOMException('Failed', 'UnknownError');
+      }
       disk.setItem(key, value);
     },
     removeItem: (key: string) => {
-      if (faults.write(key)) throw new DOMException('Failed', 'UnknownError');
+      if (faults.write(key)) {
+        throw new DOMException('Failed', 'UnknownError');
+      }
       removed.push(key);
       disk.removeItem(key);
     },
@@ -341,8 +347,11 @@ it.each([
     new Kirora({ clientKey: 'kirora_pk_test', logLevel: 'none' }).setTrackingConsent(
       false,
     );
-    if (value === null) localStorage.removeItem(CONSENT_KEY);
-    else localStorage.setItem(CONSENT_KEY, value);
+    if (value === null) {
+      localStorage.removeItem(CONSENT_KEY);
+    } else {
+      localStorage.setItem(CONSENT_KEY, value);
+    }
 
     expect(await trackOnce({ requireTrackingConsent })).toEqual([]);
   }
@@ -440,7 +449,9 @@ it.each([
   async (_, granted) => {
     const { faults } = faultyStorage();
     const client = () => new Kirora({ clientKey: 'kirora_pk_test', logLevel: 'none' });
-    if (granted) client().setTrackingConsent(false);
+    if (granted) {
+      client().setTrackingConsent(false);
+    }
     const kirora = client();
     // The first write reaches the disk; the page "stops" before the second does.
     let writes = 0;

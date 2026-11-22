@@ -54,11 +54,15 @@ if (Array.isArray(snippet) && snippet.options) {
  */
 async function replay(calls: Snippet, kirora: sdk.Kirora): Promise<void> {
   // `calls.length` is read each time round, as the page may add more.
-  for (let next = 0; next < calls.length; next++) await make(kirora, calls[next]!);
+  for (let next = 0; next < calls.length; next++) {
+    await make(kirora, calls[next]!);
+  }
   // The page may keep a reference to the snippet from before the script loaded, e.g. a
   // `kirora` variable, whose methods queue here: from now on each call is made at once.
   calls.push = (...queued) => {
-    for (const call of queued) void make(kirora, call);
+    for (const call of queued) {
+      void make(kirora, call);
+    }
     return calls.length;
   };
   window.kirora = kirora;
@@ -69,7 +73,9 @@ async function make(kirora: sdk.Kirora, [method, args, held]: QueuedCall): Promi
   // Called with `.apply(kirora, …)` below.
   // eslint-disable-next-line @typescript-eslint/unbound-method
   const call = kirora[method] as (...args: unknown[]) => unknown;
-  if (typeof call !== 'function') return;
+  if (typeof call !== 'function') {
+    return;
+  }
   try {
     // The held call's time and page are only needed while it's made, not awaited.
     await asHeld(held, () => call.apply(kirora, args));

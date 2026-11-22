@@ -91,7 +91,7 @@ async function change(
 it('tells Kirora of the new subscription with the client key, and keeps it', async () => {
   const replacement = subscription('https://push.example.com/new');
   await change({
-    oldSubscription: subscription(saved.subscription.endpoint!),
+    oldSubscription: subscription(saved.subscription!.endpoint!),
     newSubscription: replacement,
   });
 
@@ -161,12 +161,18 @@ it('does nothing once permission is gone and it cannot subscribe again', async (
 });
 
 it.each([404, 409])(
-  'forgets the subscription when Kirora answers %i, without retrying',
+  'forgets the subscription when Kirora answers %i, without retrying, keeping the API address',
   async (status) => {
     answers = [() => Promise.resolve(new Response(null, { status }))];
     await change({ newSubscription: subscription('https://push.example.com/new') });
     expect(sent).toHaveLength(1);
-    expect(await readSubscription(SCOPE)).toBeUndefined();
+    const kept = await readSubscription(SCOPE);
+    expect(kept?.subscription).toBeUndefined();
+    // Tracking URLs are still checked against the page's own Kirora.
+    expect(kept?.apiUrl).toBeDefined();
+    // A later change has nothing to move.
+    await change({ newSubscription: subscription('https://push.example.com/newer') });
+    expect(sent).toHaveLength(1);
   },
 );
 
@@ -191,7 +197,7 @@ it('retries a 429 after its Retry-After, a 5xx and a network failure with backof
     await vi.advanceTimersByTimeAsync(4_000);
     await done;
     expect(sent).toHaveLength(3);
-    expect((await readSubscription(SCOPE))?.subscription.endpoint).toBe(
+    expect((await readSubscription(SCOPE))?.subscription?.endpoint).toBe(
       'https://push.example.com/new',
     );
   } finally {
@@ -244,7 +250,9 @@ it('waits out a Retry-After date under a minute before trying again', async () =
     let first = true;
     answers = [
       () => {
-        if (!first) return Promise.resolve(new Response(null, { status: 204 }));
+        if (!first) {
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
         first = false;
         const inThirty = new Date(Date.now() + 30_000).toUTCString();
         return Promise.resolve(

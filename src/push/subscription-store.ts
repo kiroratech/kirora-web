@@ -14,7 +14,11 @@ export type SavedSubscription = {
   pushAppId: string;
   /** The key the subscription was made with, base64url, to subscribe again. */
   vapidPublicKey: string;
-  subscription: PushSubscriptionJSON;
+  /**
+   * The subscription registered. Missing once Kirora no longer has it (a 404 or 409 to
+   * a subscription change): the rest stays, as tracking URLs are checked against `apiUrl`.
+   */
+  subscription?: PushSubscriptionJSON;
 };
 
 const DATABASE = 'kirora-push';

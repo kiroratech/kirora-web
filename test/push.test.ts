@@ -10,12 +10,14 @@ import {
   sentEvents,
 } from './fake-kirora.js';
 import { stubIndexedDB } from './fake-indexeddb.js';
+import { saveSubscription } from '../src/push/subscription-store.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 const REGISTRATION_KEY = 'kirora:push-registration:kirora_pk_a@api.kirora.io';
+const PENDING_DETACH_KEY = 'kirora:push-pending-detach:kirora_pk_a@api.kirora.io';
 
 /** Who Kirora was told owns this browser, in order: a user for a PUT, `-user` for a DELETE. */
 function deviceChanges(requests: SentRequest[]) {
@@ -222,6 +224,8 @@ it('forgets the device id kept for detaching, once logout has detached the brows
 
 it('reuses its own subscription where the browser cannot say which key made it', async () => {
   stubLocalStorage();
+  // The worker's record, which outlives the logout, says the subscription is ours.
+  stubIndexedDB();
   stubWebPush();
   const server = fakeKirora();
   const kirora = pushClient();
@@ -361,6 +365,7 @@ it("registers with the browser's language and time zone, and nothing else about 
     subscription: expect.objectContaining({
       endpoint: 'https://push.example.com/subscription',
     }) as unknown,
+    deviceSecret: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as unknown,
     locale: 'en',
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   });
@@ -403,6 +408,7 @@ it('tells Kirora when notifications are blocked, naming the last registration', 
       pushAppId: 'app_web',
       permission: 'denied',
       lastSeenAt: '2026-11-01T00:00:01.000Z',
+      deviceSecret: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as unknown,
       locale: 'en',
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     },
@@ -671,4 +677,256 @@ it('cancels the subscription at once when a detachment is out of time already', 
   }
   expect(await browserSubscription()).toBeNull();
   kirora.destroy();
+});
+
+// Found in the 22 November 2026 pre-release audit.
+
+it('detaches with the lastSeenAt of a registration still under way at logout', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  let holding = false;
+  const server = fakeKirora((request) => holding && request.method === 'PUT');
+  const deletes: string[] = [];
+  const kiroraFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+    if (init.method === 'DELETE') {
+      deletes.push(new URL(url).search);
+    }
+    return kiroraFetch(url, init);
+  });
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  // A day later the registration is due again, and is renewed as push is switched on.
+  const record = JSON.parse(localStorage.getItem(REGISTRATION_KEY)!) as { at: number };
+  record.at -= 2 * 24 * 60 * 60_000;
+  localStorage.setItem(REGISTRATION_KEY, JSON.stringify(record));
+  holding = true;
+  const enabling = kirora.setPushEnabled(true);
+  await vi.waitFor(() => expect(server.held).toHaveLength(1));
+  const loggingOut = kirora.logout();
+  server.release();
+  await Promise.all([enabling, loggingOut]);
+  // The renewal's lastSeenAt (the second registration's), or Kirora would keep it (409).
+  expect(deletes).toEqual([
+    `?lastSeenAt=${encodeURIComponent('2026-11-01T00:00:02.000Z')}`,
+  ]);
+});
+
+it('cancels the subscription when push is switched off during its first registration', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora((request) => request.method === 'PUT');
+  const kirora = pushClient();
+  const signingIn = kirora.identify(tokenFor('alice'));
+  await vi.waitFor(() => expect(server.held).toHaveLength(1));
+  const switchingOff = kirora.setPushEnabled(false);
+  server.release();
+  await Promise.all([signingIn, switchingOff]);
+  expect(await browserSubscription()).toBeNull();
+});
+
+it('takes back its own subscription after a logout, once the push app changed its key', async () => {
+  stubLocalStorage();
+  stubIndexedDB();
+  stubWebPush();
+  const server = fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  await kirora.logout();
+  // The push app was replaced since: the subscription has the old app's key.
+  const old = await browserSubscription();
+  Object.defineProperty(old, 'options', {
+    value: { applicationServerKey: OTHER_KEY.buffer },
+  });
+
+  await kirora.identify(tokenFor('bob'));
+
+  expect(keyOf(await browserSubscription())).toEqual(bytesOf(PUSH_APP_KEY));
+  expect(deviceChanges(server.handled).at(-1)).toBe('bob');
+});
+
+it('uses the service worker the site registered itself, rather than registering a copy', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  fakeKirora();
+  const register = vi.spyOn(navigator.serviceWorker, 'register');
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  expect(await browserSubscription()).not.toBeNull();
+  expect(register).not.toHaveBeenCalled();
+});
+
+it('takes its own subscription as made with its key where neither the browser nor a record can say', async () => {
+  stubLocalStorage();
+  stubIndexedDB();
+  stubWebPush();
+  const server = fakeKirora();
+  const registration = await navigator.serviceWorker.getRegistration();
+  // Ours, with both records lost (a cleared page record, a worker record not read).
+  const ours = await registration!.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: OTHER_KEY,
+  });
+  // As in Firefox 74, which has no PushSubscription.options.
+  Object.defineProperty(ours, 'options', { value: undefined });
+  const kirora = pushClient();
+
+  await kirora.identify(tokenFor('alice'));
+
+  expect(await browserSubscription()).toBe(ours);
+  expect(deviceChanges(server.handled)).toEqual(['alice']);
+});
+
+it("ignores another workspace's worker record on the same site", async () => {
+  stubLocalStorage();
+  stubIndexedDB();
+  stubWebPush();
+  const server = fakeKirora();
+  const registration = await navigator.serviceWorker.getRegistration();
+  // Another workspace's subscription, made with its own key, and its worker record.
+  const theirs = await registration!.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: OTHER_KEY,
+  });
+  Object.defineProperty(theirs, 'endpoint', { value: 'https://push.example.com/theirs' });
+  await saveSubscription(registration!.scope, {
+    url: 'https://api.kirora.io/client/v1/push-subscription-change',
+    apiUrl: 'https://api.kirora.io',
+    clientKey: 'kirora_pk_other_workspace',
+    sdk: 'kirora-web/0.1.0',
+    pushAppId: 'app_other',
+    vapidPublicKey: OTHER_KEY_BASE64,
+    subscription: { endpoint: 'https://push.example.com/theirs' },
+  });
+  const kirora = pushClient();
+
+  await kirora.identify(tokenFor('alice'));
+
+  // Not taken as ours, so not replaced: the other workspace keeps its subscription.
+  expect(await browserSubscription()).toBe(theirs);
+  expect(deviceChanges(server.handled)).toEqual([]);
+});
+
+it("registers the browser where the worker's IndexedDB record never answers (Safari 14)", async () => {
+  stubLocalStorage();
+  stubWebPush();
+  // indexedDB.open() left unanswered.
+  vi.stubGlobal('indexedDB', { open: () => ({}) });
+  const server = fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  expect(deviceChanges(server.handled)).toEqual(['alice']);
+}, 10_000);
+
+// The device secret (22 November 2026): detaching with no user token held.
+
+/** The device secret this browser sent with its registrations. */
+function sentSecret(requests: SentRequest[]): string {
+  const put = requests.find((request) => request.method === 'PUT');
+  return (put!.body as { deviceSecret: string }).deviceSecret;
+}
+
+/** The detachments Kirora was sent, as `authorization lastSeenAt-query`. */
+function detaches(requests: SentRequest[]) {
+  return requests
+    .filter((request) => request.method === 'DELETE')
+    .map((request) => `${request.authorization} ${request.search}`);
+}
+
+it('detaches with the device secret when logout() comes with nobody signed in', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  const before = pushClient();
+  await before.identify(tokenFor('alice'));
+  before.destroy();
+
+  // A reload where the app restored its own session and logs out before identify().
+  const reloaded = pushClient();
+  await reloaded.logout();
+
+  expect(detaches(server.handled)).toEqual([
+    `Device ${sentSecret(server.handled)} ?lastSeenAt=${encodeURIComponent('2026-11-01T00:00:01.000Z')}`,
+  ]);
+  expect(savedRegistration()).toBeUndefined();
+});
+
+it("goes on with the device secret when Kirora refuses the user's token to detach", async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+
+  server.answerFirst = (request) =>
+    request.method === 'DELETE' && request.authorization?.startsWith('Bearer')
+      ? Promise.resolve(new Response(null, { status: 401 }))
+      : undefined;
+  await kirora.logout();
+
+  const sent = detaches(server.handled);
+  expect(sent[0]).toMatch(/^Bearer /);
+  expect(sent.at(-1)).toMatch(new RegExp(`^Device ${sentSecret(server.handled)} `));
+});
+
+it('carries on with a detachment still being retried after a reload, by its secret', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+
+  // Kirora can't be reached as Alice logs out: the detachment is left to retry.
+  server.answerFirst = (request) =>
+    request.method === 'DELETE'
+      ? Promise.reject(new TypeError('Failed to fetch'))
+      : undefined;
+  await kirora.logout();
+  kirora.destroy();
+  expect(localStorage.getItem(PENDING_DETACH_KEY)).toContain(sentSecret(server.handled));
+
+  // The next page, back online.
+  const secret = sentSecret(server.handled);
+  server.answerFirst = undefined;
+  server.handled.length = 0;
+  const next = pushClient();
+  await vi.waitFor(() => expect(detaches(server.handled)).toHaveLength(1));
+  expect(detaches(server.handled)[0]).toMatch(new RegExp(`^Device ${secret} `));
+  await vi.waitFor(() => expect(localStorage.getItem(PENDING_DETACH_KEY)).toBeNull());
+  next.destroy();
+});
+
+it("never signs another tab's signed-in user out of push from logout() with nobody signed in", async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  // Alice is signed in in one tab.
+  const aliceTab = pushClient();
+  await aliceTab.identify(tokenFor('alice'));
+
+  // Another tab, where nobody is signed in, calls logout() (an anonymous page, say).
+  const otherTab = pushClient();
+  await otherTab.logout();
+
+  expect(detaches(server.handled)).toEqual([]);
+  expect(savedRegistration()).toBe('alice');
+  aliceTab.destroy();
+  otherTab.destroy();
+});
+
+it('sends one device secret it made itself with every registration, the denied form too', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  denyNotifications();
+  await kirora.identify(tokenFor('bob'));
+
+  const secrets = server.handled
+    .filter((request) => request.method === 'PUT')
+    .map((request) => (request.body as { deviceSecret?: string }).deviceSecret);
+  expect(secrets.length).toBeGreaterThanOrEqual(2);
+  expect(secrets[0]).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(new Set(secrets).size).toBe(1);
 });

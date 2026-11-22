@@ -67,7 +67,9 @@ function stubPage({
     page,
     setTitle: (newTitle: string) => {
       page.title = newTitle;
-      for (const notify of [...observers]) notify();
+      for (const notify of [...observers]) {
+        notify();
+      }
     },
   };
 }
@@ -188,7 +190,9 @@ function navigatingApp({ emptying }: { emptying: boolean }) {
   return {
     navigate(path: string) {
       vi.stubGlobal('location', new URL(path, 'https://example.com'));
-      if (emptying) page.title = '';
+      if (emptying) {
+        page.title = '';
+      }
       history.pushState(null, '', path);
     },
     setTitle,
@@ -280,4 +284,15 @@ describe('page views', () => {
 
     expect(viewed).toEqual(['/ Home', '/untitled ']);
   });
+});
+
+it('patches history once, however many clients come and go (hot reload)', () => {
+  stubPage({ href: 'https://example.com/' });
+  watchViews().stop();
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- compared, not called
+  const patched = history.pushState;
+  watchViews().stop();
+  watchViews().stop();
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- compared, not called
+  expect(history.pushState).toBe(patched);
 });

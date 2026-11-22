@@ -28,15 +28,19 @@ Or load it from a CDN with a `<script>` tag (see [Script tag](#script-tag)).
 
 In the Kirora dashboard, go to **Developer → SDK**:
 
-- The **client key** (`kirora_pk_…`) is public and goes in your page.
-- The **token secret** is private. Keep it on your server, e.g. as
-  `KIRORA_SDK_TOKEN_SECRET`.
+- The **client key** (`kirora_pk_…`), shown as **Public key**, is public and goes in your
+  page.
+- The **SDK token secret**, shown as **Secret key**, is private. Keep it on your server,
+  e.g. as `KIRORA_SDK_TOKEN_SECRET`.
+
+Your workspace's server API keys (for `/v1`) never go in the page either: the SDK only
+needs the client key, and a user token your server signs.
 
 ### 2. Add a token route to your server
 
 The SDK sends events as the user named in a signed token. Your server must derive that
 user from your app's authenticated session, never from an ID supplied by the browser.
-Keep the token secret out of client bundles and public environment variables.
+Keep the SDK token secret out of client bundles and public environment variables.
 
 For a Node.js server, install the token helper separately:
 
@@ -84,10 +88,15 @@ export async function GET() {
 }
 ```
 
-In other languages, sign an HS256 JWT with the token secret. Set `sub` to your app's user
-ID as a string, `iat` to the current Unix time in seconds, and `exp` to at most 24 hours
-later. A one-hour lifetime is a useful starting point. Return plain text with
+In other languages, sign an HS256 JWT with the SDK token secret. Set `sub` to your app's
+user ID as a string, `iat` to the current Unix time in seconds, and `exp` to at most 24
+hours later. A one-hour lifetime is a useful starting point. Return plain text with
 `Cache-Control: no-store`, including on error responses.
+
+Kirora keeps each signed-in user as a **contact**, whose `externalId` is the token's `sub`;
+it creates the contact on the first call with a new `sub`. Use the same ID you give that
+contact through Kirora's server API, or the same person becomes two contacts. Kirora
+refuses a token whose `iat` is more than a minute ahead of its own clock.
 
 ### 3. Create the client
 
@@ -117,9 +126,9 @@ export const kirora = new Kirora({
 
 ### Identify users
 
-Call `identify()` on every page load where the user is signed in, and right after they
-sign in. Call `logout()` before your own sign-out, while the token route can still
-authenticate the user.
+Call `identify()` on every page load where the user is signed in, including when your app
+restores its own session, and right after they sign in. Call `logout()` before your own
+sign-out, while the token route can still authenticate the user.
 
 ```ts
 try {
@@ -141,16 +150,27 @@ promises from `identify()` and the push methods that can reject in your applicat
 
 `logout()` never rejects and returns within 5 seconds, whatever the network does. In that
 time it tries, side by side, to send the user's queued events and detach this browser
-from their pushes; then it forgets the user and anything of theirs still unsent. Events
-tracked while it runs go to whoever signs in next. If Kirora can't
-be told, the SDK cancels the browser's push subscription and keeps retrying the
-detachment in the background (for up to a day) while the page stays open. A late retry
-never undoes a newer sign-in: it names the registration it's detaching, so if the same
-user signs in again meanwhile, in any tab, Kirora keeps their new registration, and if
-someone else has signed in, it leaves theirs alone. Those retries live in memory only: if
-the browser is offline at sign-out and the page closes, Kirora isn't told until the device
-is registered again, so sign-out can't promise the server stops pushes at once. The
-cancelled subscription stops them on this browser.
+from their pushes; then it forgets the user and anything of theirs still unsent, and the
+events waiting from before sign-in, which they tracked too, so the next user to sign in
+never gets them. Events tracked while it runs go to whoever signs in next.
+
+With nobody signed in (a reload where your app restored its session but `identify()`
+hasn't run yet), `logout()` still detaches this browser, with a device secret: random
+bytes the browser made once and sent with each registration, which can only detach it. It
+leaves the registration alone while its user is signed in in another tab (each tab holds
+a Web Lock for its user; in browsers without Web Locks, before Firefox 96 and Safari
+15.4, it can't tell, so it leaves it alone too). Of the events waiting, it drops only those
+that went on a signed-in user's visit, as a restored session's do: a visitor who never
+signed in keeps theirs, for when they sign up. Call `logout()` when a user signs out,
+not on every page where nobody is signed in.
+
+If Kirora can't be told, the SDK cancels the browser's push subscription and keeps
+retrying the detachment in the background, for up to a day, with the user's token while
+Kirora accepts it and then the device secret. A page loaded later carries on with it. A
+late retry never undoes a newer sign-in: it names the registration it's detaching, so if
+the same user signs in again meanwhile, in any tab, Kirora keeps their new registration,
+and if someone else has signed in, it leaves theirs alone. The cancelled subscription
+stops pushes on this browser at once.
 
 Tokens stay in memory, so identification must run again after a reload. With
 `fetchUserToken`, the SDK asks for a fresh token a minute before the current one's `exp`,
@@ -169,9 +189,9 @@ call as that user, such as `setPushConsent()`, rejects at once with a 401
 
 To hear when the user's token fails in the background, where no method call would tell
 you, pass `onAuthenticationFailed`. It's called with `fetch_failed` (`fetchUserToken`
-threw or timed out) or `refused` (Kirora refused the token and no fresh one was
-accepted), once per failure until a request with the user's token succeeds or
-`identify()` is called. A failed early refresh is retried, and reported only if a refresh
+threw, answered no token or timed out) or `refused` (Kirora refused the token and no
+fresh one was accepted), once per failure until a request with the user's token succeeds
+or `identify()` is called. A failed early refresh is retried, and reported only if a refresh
 still fails once the token has expired or Kirora has refused it. It's called on its own,
 apart from the SDK's work, and only if that user is still signed in then: never after
 `destroy()`, after another user has signed in, or during `logout()`. It isn't called for
@@ -192,9 +212,17 @@ kirora.track('Plan Upgraded', { plan: 'pro', seats: 5 });
 kirora.track('Order Completed', { order_id: 'A-1001', total: 49.99, currency: 'GBP' });
 ```
 
-`track()` returns immediately, so there's no need to `await` it. Events tracked before
-sign-in are queued and attributed to the **next identified user**, who adopts them as
-they sign in. Events recorded while signed in remain bound to that user. Properties are
+`track()` returns immediately, so there's no need to `await` it. Nothing is sent for a
+visitor who never signs in: Kirora has no anonymous contacts. Events tracked before
+sign-in are queued and attributed to the **next signed-in user**, who adopts them as they
+sign in. Events recorded while signed in remain bound to that user.
+
+Every event the SDK sends counts against your plan's monthly event allowance (1,000 on
+Free), including the automatic `Session Started` and `Page Viewed`; past it, Kirora
+refuses events with `PLAN_LIMIT_REACHED`. An event that reaches Kirora more than 72 hours
+after it happened (one queued while offline, say) starts no journey, though it still
+counts for segments, journey exits and waits; one older than your plan keeps events (30
+days on Free) is refused. Properties are
 copied as they are when `track()` is called, and must be JSON: an event holding something
 JSON can't (a function, `NaN`, a `Map`, a circular reference) is dropped and logged.
 Dates are sent as ISO strings, and members that are `undefined` are left out. Avoid
@@ -208,7 +236,9 @@ page views, before it's stored or sent. It gets a copy of `{ name, properties, c
 and returns it with fields changed or removed, or `null` to drop the event. It must answer
 at once: an error, a promise, or values JSON can't hold drop the event, and only the
 kind of failure is logged, never the event. The event's name, time and idempotency key
-stay the SDK's. Calling `track()` from inside it is refused.
+stay the SDK's. Calling `track()` from inside it is refused. Change or remove what's in
+`context`, but don't add fields to it: Kirora accepts only the fields it defines there,
+and refuses an event with any other.
 
 A page address can appear in several places, so redact every copy:
 
@@ -259,10 +289,15 @@ browsers send other sites only the origin by default.
 ### Sessions
 
 A session starts with a `Session Started` event. Its properties record how the visitor
-arrived (`path`, `referrer` and any `utm_*` tags). Every event includes the session in
-`context.sessionId`. Sessions end after 30 minutes of inactivity, at `logout()`, and when
-another user signs in; they're shared across tabs and subdomains. Set
-`trackSessions: false` to turn them off.
+arrived (`path`, `referrer` and any `utm_*` tags, as properties a segment or journey can
+filter on). Every event includes the session in
+`context.sessionId`. Sessions end after 30 minutes of inactivity, and at `logout()`.
+Each signed-in user has their own session, shared across tabs and subdomains, so two tabs
+signed in as different users each keep theirs. A visit begun before sign-in becomes the
+session of whoever signs in. A reload continues the visit in progress until `identify()`
+runs again; if someone else signs in then, the events from before sign-in go to them
+without the earlier user's session, so the two visits are never joined. Set
+`trackSessions: false` to turn sessions off.
 
 ### Tracking consent
 
@@ -313,6 +348,8 @@ are separate settings.
 
    ```sh
    cp node_modules/@kirora/web/dist/kirora-sw.js public/kirora-sw.js
+   # Yarn Plug'n'Play, which has no node_modules:
+   cp "$(node -p "require.resolve('@kirora/web/kirora-sw.js')")" public/kirora-sw.js
    ```
 
    Repeat the copy when the SDK is updated, ideally as part of your app's build. The
@@ -331,9 +368,37 @@ are separate settings.
 
    Set `push: { serviceWorkerUrl: '/sw.js' }` on the client from the quickstart.
 
+   Kirora's listeners then run beside yours. If your own `push` or `notificationclick`
+   handlers show or open something for every event, have them skip Kirora's, or a push
+   shows twice and a tap opens two windows:
+
+   ```js
+   const isKiroras = (event) => {
+     try {
+       return event.data?.json().kirora === 'true';
+     } catch {
+       return false; // not JSON, so not Kirora's
+     }
+   };
+   self.addEventListener('push', (event) => {
+     if (isKiroras(event)) return; // Kirora's: shown by kirora-sw.js
+     // …your own handling
+   });
+   self.addEventListener('notificationclick', (event) => {
+     if (event.notification.data?.kirora) return; // Kirora's: handled by kirora-sw.js
+     // …your own handling
+   });
+   ```
+
+   A worker holds one push subscription, so Kirora can't share yours with another push
+   provider. If you register a different worker at the same scope later, it replaces
+   `kirora-sw.js` and Kirora's pushes stop.
+
    For generated workers, configure the generator to import the script. `importScripts`
-   requires a classic worker; it cannot be used in a module worker. The SDK refuses to
-   replace a different worker and logs what to change.
+   requires a classic worker; it cannot be used in a module worker. If your worker is
+   bundled, `import '@kirora/web/kirora-sw.js'` works too: the package marks it as having
+   side effects, so bundlers keep it. The SDK refuses to replace a different worker and
+   logs what to change.
 
 4. Ask for permission from a click (browsers block the prompt otherwise):
 
@@ -416,8 +481,8 @@ export function KiroraSession({ userId }: { userId: string | null }) {
 ### Next.js
 
 Use the client from client components (`'use client'`). Importing it during server
-rendering is safe. Call SDK methods from the browser; on browser initialization, sessions
-and optional page views can be queued before `identify()`.
+rendering is safe. Call SDK methods from the browser; once the client is created there,
+sessions and optional page views can be queued before `identify()`.
 
 See the [complete Next.js example](examples/nextjs) and [example setup instructions](examples/README.md)
 for the token route, session component and sign-out handler. If push is enabled, put
@@ -481,7 +546,7 @@ from the quickstart, and pin the CDN URL to the SDK version you use.
 
   // Call identify() only when your app knows the user is signed in.
   // kirora.identify();
-  kirora.track('Signup Started');
+  kirora.track('Signed Up');
 </script>
 ```
 
@@ -503,7 +568,7 @@ Paste this into your agent (Claude Code, Cursor, Copilot and so on):
 ```text
 Install the Kirora web SDK in this app: add the @kirora/web package with this project's
 package manager, then follow node_modules/@kirora/web/llms.txt step by step. Ask me for
-the client key and token secret, and before setting up consent or web push.
+the client key and SDK token secret, and before setting up consent or web push.
 ```
 
 The packaged [llms.txt](llms.txt) covers the integration steps and checks for common mistakes.
@@ -515,7 +580,7 @@ The packaged [llms.txt](llms.txt) covers the integration steps and checks for co
 | Option                   | Type                                                        | Default                               |
 | ------------------------ | ----------------------------------------------------------- | ------------------------------------- |
 | `clientKey`              | `string`                                                    | required                              |
-| `fetchUserToken`         | `() => Promise<string>`                                     | omitted; pass a token to `identify()` |
+| `fetchUserToken`         | `() => Promise<string \| null \| undefined>`                | omitted; pass a token to `identify()` |
 | `trackPageViews`         | `boolean`                                                   | `false`                               |
 | `trackSessions`          | `boolean`                                                   | `true`                                |
 | `requireTrackingConsent` | `boolean`                                                   | `false`                               |
@@ -553,7 +618,8 @@ Every error the SDK throws is a `KiroraError`, so one `instanceof` check catches
 
 - `KiroraApiError` when Kirora refuses a call, with `status`, `code`, `retryAfterMs` and
   `retryable`.
-- `UserTokenError` when `fetchUserToken` fails or doesn't answer within 30 seconds. During
+- `UserTokenError` when `fetchUserToken` fails, answers no token (`null` or empty) or
+  doesn't answer within 30 seconds. During
   delivery it's logged instead, `onAuthenticationFailed` is called, and queued events are
   retried later.
 - `KiroraError` itself for a setup problem (no token and no `fetchUserToken`, an `apiUrl`
@@ -583,13 +649,17 @@ name or whose properties aren't an object, which isn't tracked.
   so Kirora can deduplicate retries. An event is only removed once Kirora has answered
   for it; events it rejects outright are logged and dropped so they don't block the queue,
   while those refused for a passing reason (rate limits, server errors) are retried. A
-  batch refused as too large (413) or invalid (422), or with a 400 naming an event's
-  field, is sent in halves until the event to blame is found, and only that one is
-  dropped. A 400 that names no event (a problem with the request itself), and a status
+  batch refused as too large (413), or with a 400 or 422 naming an event's field, is
+  sent in halves until the event to blame is found, and only that one is dropped. A 400
+  or 422 that names no event (a problem with the request itself), and a status
   Kirora doesn't give for a batch (a 403, 404 or 409 from a wrong `apiUrl`, a proxy or a
   captive portal), keep the whole batch for a retry. A
-  single event over 1 MB is dropped. While the tab is hidden, batches go with `keepalive`
-  and stay under 60 KB; an event too large for that waits until the tab is shown again.
+  single event over 1 MB is dropped here; Kirora itself refuses properties over 16 KB. While the tab is hidden, batches go with `keepalive`
+  and stay under 60 KB together; an event too large for that waits until the tab is shown
+  again. Firefox only honours `keepalive` from version 133: before that, a batch sent as
+  the tab closes may be cut off, and goes on the next visit instead. Chrome 80 refuses
+  `keepalive` for a request that needs a CORS preflight, as Kirora's do; the SDK then
+  sends without it, which works while the tab is only hidden.
 - **Users stay apart.** An event tracked while a user is signed in is only ever sent as
   that user, even if another signs in before it's sent. Events tracked before sign-in are
   adopted by whoever signs in next, once, even with several tabs open. Each workspace's
@@ -602,8 +672,10 @@ name or whose properties aren't an object, which isn't tracked.
   grant saved earlier, so it can't come back on the next page.
 - **Event context.** Each event includes a `context` alongside your properties: the page
   (`url`, `path`, `search`, `title`, `referrer`, using the canonical URL if the page has
-  one, as Segment does), `utm_*` campaign tags, `locale`, `timezone`, `sessionId` and
-  `device.id`. Kirora adds the IP address and user agent on the server.
+  one, as Segment does), the page's `utm_*` tags as `campaign` (`source`, `medium`,
+  `name`, `term`, `content`), `locale`, `timezone`, `sessionId` and `device.id`. Kirora
+  adds the IP address, user agent and `library` on the server. Segments and journeys
+  filter on an event's properties, not its context.
 - **Privacy.** Page addresses and the referrer are sent with their query strings; only URL
   fragments are dropped. Remove tokens and personal data from your addresses before the
   SDK tracks a page (see [Page views](#page-views)).
@@ -630,21 +702,24 @@ name or whose properties aren't an object, which isn't tracked.
 SDK cookies and `localStorage` entries are first-party. Other scripts running on your
 origin can read them. Tracking consent gates event, session and tracking device-ID
 storage; its decision is stored independently, as are push registrations when enabled.
-Initialization also briefly writes and removes `kirora:probe` to test storage availability.
+Creating the client also briefly writes and removes `kirora:probe` to test storage availability.
 
-| Where                                          | Name                                                                                  | Holds                                                                                         | Removed                                                                                                                                                      |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `localStorage`                                 | `kirora:events:<client key>@<api host and path>`                                      | Events waiting to be sent, with their properties and context                                  | Once Kirora answers for them; the user's at `logout()`; all on consent withdrawal. Oldest dropped past 1,000 events or 1 MB                                  |
-| Cookie on your root domain, and `localStorage` | `kirora_session_…`, `kirora:session:<client key>@<api host and path>`                 | The session id, whose it is, and when it was last active                                      | On consent withdrawal and at `logout()`. A session ends after 30 minutes without activity                                                                    |
-| Cookie on your root domain, and `localStorage` | `kirora_installation_id_…`, `kirora:installation-id:<client key>@<api host and path>` | `device.id`: a random id for this browser                                                     | On consent withdrawal, unless the browser is registered for push: then at `logout()`                                                                         |
-| `localStorage`                                 | `kirora:tracking-consent:<client key>@<api host and path>`                            | The visitor's tracking consent answer                                                         | Never; it's their answer. A grant is deleted if a later refusal can't be saved, so it can't come back                                                        |
-| `localStorage`                                 | `kirora:tracking-refused:<client key>@<api host and path>`                            | A second copy of a tracking refusal                                                           | When the visitor grants tracking consent                                                                                                                     |
-| `localStorage`                                 | `kirora:push-registration:<client key>@<api host and path>`                           | Who this browser was registered for, its push endpoint, and when                              | At `logout()` and `setPushEnabled(false)`                                                                                                                    |
-| `localStorage`                                 | `kirora:push-disabled:<client key>@<api host and path>`                               | That `setPushEnabled(false)` holds on this browser                                            | At `setPushEnabled(true)`, or when the prompt is answered `granted`                                                                                          |
-| IndexedDB                                      | `kirora-push` database                                                                | The push subscription last registered, the client key and API address, for the service worker | When Kirora refuses a replaced subscription, at `setPushEnabled(false)`, or when a failed detach cancels the subscription; replaced by the next registration |
-| IndexedDB                                      | `kirora-locks` database                                                               | Nothing: an empty store, used as a lock between tabs in browsers without Web Locks            | Never; it holds no data                                                                                                                                      |
-| The browser's push service                     | (the push subscription)                                                               | Where to deliver pushes                                                                       | At `setPushEnabled(false)`, or if `logout()` can't reach Kirora; otherwise kept for the next user                                                            |
-| Memory only                                    |                                                                                       | The user token                                                                                | When the page closes, or at `logout()`; a signed-out user's is kept until their browser is detached (at most a day)                                          |
+| Where                                          | Name                                                                                  | Holds                                                                                                                                                      | Removed                                                                                                                                                      |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `localStorage`                                 | `kirora:events:<client key>@<api host and path>`                                      | Events waiting to be sent, with their properties and context                                                                                               | Once Kirora answers for them; the user's at `logout()`; all on consent withdrawal. Oldest dropped past 1,000 events or 1 MB                                  |
+| `localStorage`                                 | `kirora:events:<client key>@<api host and path>:revision`                             | A count of the queue's writes, so a tab can tell its copy is up to date (below)                                                                            | Never; a number                                                                                                                                              |
+| Cookie on your root domain, and `localStorage` | `kirora_session_…`, `kirora:session:<client key>@<api host and path>`                 | Each live session (up to three, the most recently active, one per user active in this browser): its id, a hash of whose it is, and when it was last active | On consent withdrawal; a user's at their `logout()`. A session ends after 30 minutes without activity                                                        |
+| Cookie on your root domain, and `localStorage` | `kirora_installation_id_…`, `kirora:installation-id:<client key>@<api host and path>` | `device.id`: a random id for this browser                                                                                                                  | On consent withdrawal, unless the browser is registered for push: then at `logout()`                                                                         |
+| `localStorage`                                 | `kirora:tracking-consent:<client key>@<api host and path>`                            | The visitor's tracking consent answer                                                                                                                      | Never; it's their answer. A grant is deleted if a later refusal can't be saved, so it can't come back                                                        |
+| `localStorage`                                 | `kirora:tracking-refused:<client key>@<api host and path>`                            | A second copy of a tracking refusal                                                                                                                        | When the visitor grants tracking consent                                                                                                                     |
+| `localStorage`                                 | `kirora:push-registration:<client key>@<api host and path>`                           | Who this browser was registered for, its push endpoint, and when                                                                                           | At `logout()` and `setPushEnabled(false)`                                                                                                                    |
+| `localStorage`                                 | `kirora:device-secret:<client key>@<api host and path>`                               | The device secret, sent with each push registration so the browser can be detached with nobody signed in. Never in a cookie                                | With the device id                                                                                                                                           |
+| `localStorage`                                 | `kirora:push-pending-detach:<client key>@<api host and path>`                         | A detachment still being retried: the device id, the registration it names, and its device secret                                                          | Once Kirora answers it, or after a day                                                                                                                       |
+| `localStorage`                                 | `kirora:push-disabled:<client key>@<api host and path>`                               | That `setPushEnabled(false)` holds on this browser                                                                                                         | At `setPushEnabled(true)`, or when the prompt is answered `granted`                                                                                          |
+| IndexedDB                                      | `kirora-push` database                                                                | The push subscription last registered, the client key and API address, for the service worker                                                              | When Kirora refuses a replaced subscription, at `setPushEnabled(false)`, or when a failed detach cancels the subscription; replaced by the next registration |
+| IndexedDB                                      | `kirora-locks` database                                                               | The queue's write count (as above), and a lock between tabs in browsers without Web Locks                                                                  | Never; it holds only numbers                                                                                                                                 |
+| The browser's push service                     | (the push subscription)                                                               | Where to deliver pushes                                                                                                                                    | At `setPushEnabled(false)`, or if `logout()` can't reach Kirora; otherwise kept for the next user                                                            |
+| Memory only                                    |                                                                                       | The user token                                                                                                                                             | When the page closes, or at `logout()`; a signed-out user's is kept until their browser is detached (at most a day), never stored                            |
 
 The cookies are `SameSite=Lax`, `Secure` on HTTPS, and last a year; their value is the
 same as the `localStorage` copy, which restores a cleared cookie. If `localStorage` is
@@ -652,10 +727,16 @@ unavailable or full, the SDK keeps these in memory for the page's life instead.
 
 Several tabs share the queue, and change it one at a time under a Web Lock. Browsers
 older than Firefox 96 and Safari 15.4 have no Web Locks, so there the SDK uses an
-IndexedDB transaction as the lock instead, in a `kirora-locks` database that holds
-nothing. Only where IndexedDB is refused too (some private windows) can two tabs saving
-at the same instant lose an event, or two tabs signing in at the same instant both adopt
-the same event from before sign-in.
+IndexedDB transaction as the lock instead, in the `kirora-locks` database. A lock alone
+isn't enough: a tab's copy of `localStorage` can lag behind another tab's write for a
+moment (Chromium delivers it after the lock), and changing a stale copy would lose that
+tab's events. So each write is counted, in IndexedDB, which every tab reads alike, and
+beside the queue; a tab holding the lock waits until its copy shows the latest write.
+Where IndexedDB is refused (some private windows), nothing tells a tab when another
+tab's write has arrived. While another tab is writing the queue, the SDK waits a moment
+before reading, which in Chromium cut the events two busy tabs lose from about 20% to
+about 0.3%; two tabs signing in at the same instant there can also both adopt the same
+event from before sign-in.
 
 ## Content Security Policy
 
@@ -677,17 +758,73 @@ addresses under your `apiUrl` followed by `/t/p/`, as Kirora builds them.
 
 ## Naming events
 
-Segments, journeys and goals match event names exactly, so keep them consistent:
+Segments, journeys and goals match event names exactly (case included), so keep them
+consistent:
 
 - Use an object followed by a past-tense action, in Title Case: `Plan Upgraded`,
-  `Invoice Paid`, `Signup Started`.
+  `Payment Succeeded`, `Signed Up`.
 - Name what the user did, not where: `Order Completed` with `{ "source": "checkout" }`,
   not `Checkout Page Button Clicked`.
 - Put details in properties: `Plan Upgraded` with `{ "plan": "pro" }`, not
   `Pro Plan Upgraded`.
-- Use the standard e-commerce names where they apply: `Product Viewed`, `Product Added`,
-  `Order Completed` and so on.
-- Names starting with `contact.` are reserved.
+- Use the standard names where they apply: `Order Completed`, `Signed Up`,
+  `Trial Started`, `Subscription Started`, `Subscription Cancelled`, `Payment Failed`,
+  `Payment Succeeded`, and for shops `Product Viewed`, `Product Added` and so on.
+  Kirora's templates, goals and Kiro look for these; a workspace can map its own names
+  under **Settings › Workspace › Key events**.
+- Send each property with the same type every time, keys in `snake_case`, and amounts in
+  major units (`49.99`, not `4999`).
+
+Kirora enforces:
+
+- Names of 1 to 128 characters, without control characters, trimmed. At most 1,000
+  different names per workspace.
+- Property keys of at most 64 characters; properties of at most 16 KB as JSON.
+- Names starting with `contact.` are reserved, and `Ordered Product` is recorded by
+  Kirora from each `Order Completed`'s products, so don't send it.
+- `Session Started` and `Page Viewed` are the SDK's own: track them only through the SDK.
+
+## Using your events in Kirora
+
+The SDK's events are stored as events your server sends through Kirora's API are, so
+everything that reads events reads them:
+
+- **Segments** match contacts who did an event, how often (at least, exactly or at most;
+  "exactly 0" is never), within a time window, with up to five property conditions, and
+  optionally not followed by another event.
+- **Journeys** can start when an event arrives (with property conditions), wait until an
+  event, or end on one. Messages can use the event's properties, as
+  `{{ event.properties.plan }}`.
+- **Conversion goals** on a campaign or journey count an event as a conversion, and can
+  add up one of its properties (`total`, say) as revenue.
+- **Workspace goals** measure counts, ratios and conversions between events.
+- **Campaigns** go to segments and lists, so an event reaches a campaign through a
+  segment.
+
+The contact is the signed-in user, by the `sub` in their token. For example, with
+`kirora.track('Trial Started', { plan: 'pro' })` a segment of "did `Trial Started` at
+least once in the last 14 days, where `plan` equals `pro`" picks up that user, and a
+journey that starts on `Trial Started` can greet them by plan.
+
+## How web differs from Kirora's mobile SDKs
+
+The behaviour Kirora's SDKs share is the same on every platform. What's specific to the
+browser:
+
+- **Pages, not screens:** `trackPageView()` and the `trackPageViews` option; no
+  `trackScreenView()` or app lifecycle events. Event context has `page` and `campaign`
+  where mobile has `app`, `os` and `screen`.
+- **No `getState()`** and no `handleDeepLink`: a tap on a push opens its link from the
+  service worker, and click listeners get only the push's `data`. Web reports no
+  influenced app opens.
+- **Push needs a service worker** (`kirora-sw.js`), and the browser's support: on iPhone
+  and iPad, iOS 16.4 or later, for a site added to the Home Screen. The registration
+  sends no app or OS version; Kirora reads the user agent.
+- **Shared across subdomains:** the session and `device.id` are kept in a cookie on your
+  root domain.
+- **Closing a tab:** events go with `keepalive`, at most 60 KB at once, as the page hides.
+- **`beforeSend` sees `context`** on web; the React Native and Flutter wrappers can't
+  redact it.
 
 ## Verify your integration
 
@@ -704,14 +841,14 @@ Segments, journeys and goals match event names exactly, so keep them consistent:
 
 ## Troubleshooting
 
-| Symptom                                     | Check                                                                                                                                               |
-| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Events remain queued                        | Call `identify()` on each signed-in page load; check tracking consent, connectivity and the token route.                                            |
-| Token request fails or Kirora returns `401` | Use the authenticated session's user ID, the correct workspace token secret and an unexpired token. Never use the public client key to sign tokens. |
-| Events disappear on reload                  | Check browser storage restrictions and queue limits. In-memory fallback cannot persist across reloads.                                              |
-| Notification permission is `unsupported`    | Enable `push`, use a supported browser and secure context, and check iOS home-screen requirements.                                                  |
-| Push registration fails                     | Check the dashboard push app, the worker URL and existing worker registrations.                                                                     |
-| CSP blocks requests or scripts              | Check [Content Security Policy](#content-security-policy), including headers served with the worker.                                                |
+| Symptom                                     | Check                                                                                                                                                   |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Events remain queued                        | Call `identify()` on each signed-in page load; check tracking consent, connectivity and the token route.                                                |
+| Token request fails or Kirora returns `401` | Use the authenticated session's user ID, the correct workspace SDK token secret and an unexpired token. Never use the public client key to sign tokens. |
+| Events disappear on reload                  | Check browser storage restrictions and queue limits. In-memory fallback cannot persist across reloads.                                                  |
+| Notification permission is `unsupported`    | Enable `push`, use a supported browser and secure context, and check iOS home-screen requirements.                                                      |
+| Push registration fails                     | Check the dashboard push app, the worker URL and existing worker registrations.                                                                         |
+| CSP blocks requests or scripts              | Check [Content Security Policy](#content-security-policy), including headers served with the worker.                                                    |
 
 ## Support and contributing
 

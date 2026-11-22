@@ -129,8 +129,9 @@ it('never replays a refused call as the user who signed in since', async () => {
   vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
     const user = userOf(init);
     sent.push({ path: new URL(url).pathname, user, key: null });
-    if (user === 'alice')
+    if (user === 'alice') {
       return new Promise<Response>((resolve) => (answerAlice = resolve));
+    }
     return Promise.resolve(new Response(null, { status: 204 }));
   });
   const kirora = new Kirora({

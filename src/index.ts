@@ -1,13 +1,13 @@
 export { Kirora } from './kirora.js';
 export { KiroraApiError, KiroraError, UserTokenError } from './errors.js';
 export type {
-  AuthenticationFailure,
+  AuthenticationFailureReason,
   BeforeSendEvent,
   EventProperties,
   KiroraOptions,
+  KiroraPushOptions,
   LogLevel,
   NotificationClickListener,
-  PushOptions,
   PushPermission,
   PushStatus,
 } from './types.js';
