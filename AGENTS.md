@@ -22,5 +22,6 @@ Before finishing, run:
 
     pnpm format && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm size
 
-Update the README and `llms.txt` if public behaviour or setup changed. Once the SDK is on
-npm, also add a changeset (`pnpm changeset`) for any change users will notice.
+Update the README, the guides in `docs/` and `llms.txt` if public behaviour or setup
+changed, and add changes users will notice to `CHANGELOG.md` under `Unreleased`. Never
+bump the version or publish unless asked: merging a version bump to `main` publishes it.

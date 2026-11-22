@@ -35,8 +35,7 @@ Before submitting:
 - Run `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` and
   `pnpm size`.
 - Update the README and the guides in `docs/` if you changed public behaviour.
-- Once the SDK is on npm, run `pnpm changeset` to describe any change users will
-  notice. It goes in the changelog and decides the next version.
+- Add any change users will notice to `CHANGELOG.md`, under an `Unreleased` heading.
 
 ## Development
 
@@ -137,10 +136,13 @@ alone a push registration whose user is signed in in another tab.
 
 ### Releases
 
-Until the first release, the Release workflow only runs by hand (Actions → Release), so
-merging to `main` publishes nothing. Once releases start, it runs on every merge to `main`:
-it opens or updates a "Version packages" pull request from the pending changesets, and
-merging that pull request publishes to npm with provenance.
+To release, bump `version` in `package.json`, turn `Unreleased` in `CHANGELOG.md` into
+that version, and merge to `main`, or push a matching `v*` tag. The
+[Release workflow](.github/workflows/release.yml) publishes that version if npm doesn't
+have it yet: it checks the package, packs it once and publishes that tarball, with
+provenance. A prerelease (`0.2.0-beta.1`) goes to the `next` dist-tag. It uses npm trusted
+publishing, so no npm token is stored: npm trusts this repository's `release.yml` in the
+`npm` environment. `scripts/release-plan.mjs` decides whether and where to publish.
 
 By contributing, you agree that your contributions are licensed under the
 [MIT License](LICENSE).
