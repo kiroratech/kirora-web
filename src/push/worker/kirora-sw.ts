@@ -5,6 +5,7 @@
 import { DEFAULT_API_URL } from '../../api/default-api-url.js';
 import { base64UrlBytes } from '../../utils/base64url.js';
 import { retryAfterMs } from '../../utils/retry-after.js';
+import { wait } from '../../utils/timeout.js';
 import {
   readSubscription,
   saveSubscription,
@@ -193,10 +194,6 @@ self.addEventListener('message', (event) => {
     held.claimed();
   }
 });
-
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /**
  * Reports a push delivered (on screen) or tapped to its tracking URL, which names the

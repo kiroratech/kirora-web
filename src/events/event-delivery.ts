@@ -1,3 +1,4 @@
+import { MAX_TIMER_MS } from '../utils/timeout.js';
 import { isPageHidden } from '../utils/page-hidden.js';
 import { sessionOwner } from '../tracking/session.js';
 import type { ClientApi } from '../api/client-api.js';
@@ -20,8 +21,6 @@ const ENVELOPE_BYTES = 64;
 const FLUSH_AT_EVENTS = 20;
 const FLUSH_INTERVAL_MS = 30_000;
 const MAX_RETRY_DELAY_MS = 5 * 60_000;
-/** The longest delay `setTimeout` takes. */
-const MAX_TIMER_MS = 2 ** 31 - 1;
 /**
  * Kirora's one refusal of a whole batch that holds for good: the plan lacks the feature.
  * Any other 4xx (a 403, 404 or 409, say) never comes from `/events/batch` itself but from
@@ -206,8 +205,8 @@ export class EventDelivery {
         (await this.queue.oldest(maxEvents, user.subject, hidden)).filter(
           (event) => !this.inFlight.has(event.idempotencyKey),
         ),
-        hidden ? MAX_KEEPALIVE_BYTES - this.keepaliveBytes : MAX_BATCH_BYTES,
         hidden,
+        this.keepaliveBytes,
       );
       // Consent may have been withdrawn, or the user changed, while the queue was read.
       if (batch.length === 0 || !mayStillSend()) return;
@@ -215,12 +214,14 @@ export class EventDelivery {
       for (const key of keys) this.inFlight.add(key);
       const keepaliveBytes = hidden ? bytes : 0;
       this.keepaliveBytes += keepaliveBytes;
-      let outcome: Awaited<ReturnType<EventDelivery['sendBatch']>>;
+      let outcome: BatchOutcome;
       // The answer's Retry-After, for what it leaves unsettled: this send's own, as sends
       // while hidden overlap.
-      const answer = { retryAfterMs: 0 };
+      let retryAfterMs = 0;
       try {
-        outcome = await this.sendBatch(user, batch, hidden, answer);
+        outcome = await this.sendBatch(user, batch, hidden, (delayMs) => {
+          retryAfterMs = delayMs;
+        });
         // Still on their way until removed, so another send can't pick them up again.
         if (outcome instanceof Set) await this.queue.remove(outcome);
       } finally {
@@ -237,7 +238,7 @@ export class EventDelivery {
       if (outcome.size < batch.length) {
         this.log('debug', `Retrying ${batch.length - outcome.size} events later`);
         // Never sooner than the answer's Retry-After, as for a 429.
-        this.retryLater(user, undefined, answer.retryAfterMs);
+        this.retryLater(user, undefined, retryAfterMs);
         return;
       }
       this.resetBackoff(user);
@@ -252,8 +253,8 @@ export class EventDelivery {
     user: SignedInUser,
     batch: QueuedEvent[],
     keepalive: boolean,
-    answer: { retryAfterMs: number },
-  ): Promise<Set<string> | 'split' | 'stop'> {
+    onRetryAfter: (delayMs: number) => void,
+  ): Promise<BatchOutcome> {
     const batchKeys = new Set(batch.map((event) => event.idempotencyKey));
     const sending = new AbortController();
     this.sending.set(sending, user);
@@ -264,10 +265,8 @@ export class EventDelivery {
         keepalive,
         as: user,
         signal: sending.signal,
-        onRetryAfter: (delayMs) => (answer.retryAfterMs = delayMs),
+        onRetryAfter,
       });
-      // Kirora took the token: what this sign-in adopted is its for good.
-      if (this.adoption?.user === user) this.adoption = undefined;
       const settled = this.acknowledgedKeys(sent, batchKeys);
       this.log('debug', `Sent ${settled.size} events`);
       return settled;
@@ -333,11 +332,8 @@ export class EventDelivery {
   private giveBackAdopted(user: SignedInUser): void {
     const { adoption } = this;
     if (adoption?.user !== user) return;
-    if (this.identity.accepted === user) {
-      this.adoption = undefined;
-      return;
-    }
     this.adoption = undefined;
+    if (this.identity.accepted === user) return;
     this.queue
       .release(user.subject, adoption.keys)
       .catch((error: unknown) => this.log('error', "Couldn't release events", error));
@@ -430,16 +426,18 @@ export class EventDelivery {
 }
 
 /**
- * As many of `events`, oldest first, as fit in `maxBytes`: 200 KB, or while the page is
- * hidden, what's left of keepalive's 60 KB. Always at least one, except that while hidden
- * an event too large for what's left is skipped: it waits for the page to be shown again
- * (a request without keepalive could be cut off as the tab closes), and those behind it go.
+ * As many of `events`, oldest first, as fit in one request: 200 KB, or while the page is
+ * hidden, what's left of keepalive's 60 KB with `keepaliveBytes` on their way. Always at
+ * least one, except that while hidden an event too large for what's left is skipped: it
+ * waits for the page to be shown again (a request without keepalive could be cut off as
+ * the tab closes), and those behind it go.
  */
 function fitBatch(
   events: QueuedEvent[],
-  maxBytes: number,
   hidden: boolean,
+  keepaliveBytes: number,
 ): { batch: QueuedEvent[]; bytes: number } {
+  const maxBytes = hidden ? MAX_KEEPALIVE_BYTES - keepaliveBytes : MAX_BATCH_BYTES;
   const batch: QueuedEvent[] = [];
   let bytes = ENVELOPE_BYTES;
   for (const event of events) {
@@ -470,6 +468,9 @@ function blamesAnEvent(error: KiroraApiError): boolean {
     )
   );
 }
+
+/** What became of a batch: the events it settled, or split it, or stop for now. */
+type BatchOutcome = Set<string> | 'split' | 'stop';
 
 /** One event's answer in `POST /events/batch`, as far as it can be trusted. */
 type BatchResult = {

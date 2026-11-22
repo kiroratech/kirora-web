@@ -125,20 +125,20 @@ export class ClientApi {
     const cancel = () => abort.abort();
     if (options.signal?.aborted) cancel();
     options.signal?.addEventListener('abort', cancel);
+    const request: RequestInit = {
+      method,
+      headers: {
+        authorization: `Bearer ${userToken}`,
+        'kirora-client-key': this.clientKey,
+        'kirora-sdk': SDK_NAME,
+        ...(hasBody ? { 'content-type': 'application/json' } : {}),
+      },
+      body: hasBody ? JSON.stringify(options.body) : undefined,
+      signal: abort.signal,
+    };
     const exchange = async () => {
       const call = (keepalive?: boolean) =>
-        fetch(`${apiUrl}/client/v1${path}`, {
-          method,
-          headers: {
-            authorization: `Bearer ${userToken}`,
-            'kirora-client-key': this.clientKey,
-            'kirora-sdk': SDK_NAME,
-            ...(hasBody ? { 'content-type': 'application/json' } : {}),
-          },
-          body: hasBody ? JSON.stringify(options.body) : undefined,
-          keepalive,
-          signal: abort.signal,
-        });
+        fetch(`${apiUrl}/client/v1${path}`, { ...request, keepalive });
       // Chrome 80 refuses keepalive for a request needing a CORS preflight, as ours do:
       // tried again without, which still goes if the page is only hidden, not closing.
       const response = await call(options.keepalive).catch((error: unknown) => {

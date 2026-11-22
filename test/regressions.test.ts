@@ -5,6 +5,7 @@ import { Kirora, type KiroraOptions } from '../src/index.js';
 import {
   accepted,
   fakeKirora,
+  kiroraRefusing,
   memoryStorage,
   sentEvents,
   stubLocalStorage,
@@ -281,21 +282,12 @@ it("keeps an event the app tracks as the page hides, after the SDK's own hide fl
 
 it('never takes a refreshed token naming no one as the signed-in user’s', async () => {
   stubLocalStorage();
-  const sent: (string | undefined)[] = [];
-  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
-    const authorization = new Headers(init.headers).get('authorization');
-    sent.push(authorization ?? undefined);
-    return Promise.resolve(
-      authorization === 'Bearer opaque-1'
-        ? new Response(null, { status: 401 })
-        : accepted(init.body),
-    );
-  });
+  const tokens = kiroraRefusing((token) => token === 'opaque-1');
   const kirora = client({ fetchUserToken: () => Promise.resolve('opaque-2') });
   kirora.track('Plan Upgraded');
   await kirora.identify('opaque-1');
   await kirora.flush();
-  expect(sent).not.toContain('Bearer opaque-2');
+  expect(tokens).not.toContain('opaque-2');
   kirora.destroy();
 });
 

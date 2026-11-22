@@ -198,11 +198,7 @@ export class WebPush {
     this.storage.setItem(this.disabledKey, '1');
     // As for a detachment: only a subscription Kirora has on record is surely its own.
     // Read in turn, after any registration still under way.
-    let ours = false;
-    await this.oneAtATime(() => {
-      ours = this.registered;
-      return Promise.resolve();
-    });
+    const ours = await this.operations.then(() => this.registered);
     const { user } = this.identity;
     if (user) await this.detach(user);
     if (ours) await this.oneAtATime(() => this.cancelSubscription());

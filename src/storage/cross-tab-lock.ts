@@ -9,12 +9,6 @@ const STORE = 'locks';
 /** IndexedDB is missing or refused (as in some private windows): nothing was run. */
 export class LockUnavailable extends Error {}
 
-/** `localStorage` hasn't caught up with another tab's write yet: try again shortly. */
-export const NOT_YET = Symbol('not yet');
-
-/** What a locked operation did, and the revision it leaves, if it wrote. */
-export type Locked<Result> = { result: Result; revision?: number } | typeof NOT_YET;
-
 /** A connection still unopened after this is given up on (Safari 14 can hang). */
 const OPEN_TIMEOUT_MS = 3000;
 
@@ -96,16 +90,17 @@ export async function writeRevision(name: string, revision: number): Promise<voi
 /**
  * Runs the synchronous `operation` while no other tab can run one, and resolves with its
  * result, or rejects with what it threw. Rejects with `LockUnavailable`, having run
- * nothing, if IndexedDB can't be used. `operation` is given the revision under
- * `revisionName`, and may answer a new one, saved with the lock: or answer `NOT_YET`, for
- * a `localStorage` that hasn't caught up, and the lock resolves `NOT_YET` unchanged.
+ * nothing, if IndexedDB can't be used. `operation` is given the revision under `name`
+ * (see `readRevision`) and answers its result with the revision it leaves, if it wrote,
+ * saved with the lock; or undefined, having done nothing, for a `localStorage` that hasn't
+ * caught up yet, and the lock resolves undefined.
  */
-export async function withCrossTabLock<Result>(
-  operation: (revision: number) => Locked<Result>,
-  revisionName = STORE,
-): Promise<Result | typeof NOT_YET> {
+export async function withCrossTabLock<Done extends { revision?: number }>(
+  name: string,
+  operation: (revision: number) => Done | undefined,
+): Promise<Done | undefined> {
   const database = await openDatabase();
-  return new Promise<Result | typeof NOT_YET>((resolve, reject) => {
+  return new Promise<Done | undefined>((resolve, reject) => {
     let transaction: IDBTransaction;
     try {
       transaction = database.transaction(STORE, 'readwrite');
@@ -115,19 +110,15 @@ export async function withCrossTabLock<Result>(
       reject(new LockUnavailable(String(error)));
       return;
     }
-    let outcome: { result: Result | typeof NOT_YET } | { error: unknown } | undefined;
+    let outcome: { done: Done | undefined } | { error: unknown } | undefined;
     // Its callback runs while the transaction holds the lock.
     const store = transaction.objectStore(STORE);
-    const request = store.get(revisionName);
+    const request = store.get(name);
     request.onsuccess = () => {
       try {
         const done = operation(Number(request.result) || 0);
-        if (done === NOT_YET) {
-          outcome = { result: NOT_YET };
-          return;
-        }
-        if (done.revision !== undefined) store.put(done.revision, revisionName);
-        outcome = { result: done.result };
+        if (done?.revision !== undefined) store.put(done.revision, name);
+        outcome = { done };
       } catch (error) {
         outcome = { error };
       }
@@ -136,7 +127,7 @@ export async function withCrossTabLock<Result>(
       if (!outcome) reject(new LockUnavailable('the lock transaction ended unused'));
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rethrown as thrown
       else if ('error' in outcome) reject(outcome.error);
-      else resolve(outcome.result);
+      else resolve(outcome.done);
     };
     transaction.oncomplete = settle;
     transaction.onabort = settle;

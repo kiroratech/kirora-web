@@ -28,12 +28,8 @@ export type SessionStore = { storage: KeyValueStorage; key: string };
 
 /** Ends `owner`'s session, or with no owner given, every session. */
 export function endSession(store: SessionStore, owner?: string): void {
-  if (owner === undefined) {
-    store.storage.removeItem(store.key);
-    return;
-  }
-  const sessions = liveSessions(store);
-  delete sessions[sessionOwner(owner)];
+  const sessions = owner === undefined ? {} : liveSessions(store);
+  if (owner !== undefined) delete sessions[sessionOwner(owner)];
   save(store, sessions);
 }
 
@@ -83,16 +79,9 @@ export function keepSessionAlive(store: SessionStore, owner: string | null): voi
   save(store, sessions);
 }
 
-/** The key `owner`'s session is kept under, and that `borrowedFrom` names. */
-export function sessionOwner(owner: string): string {
-  return ownerHash(owner);
-}
-
 /** Saves the newest `MAX_SESSIONS` of `sessions`, or removes them all if there are none. */
 function save({ storage, key }: SessionStore, sessions: Sessions): void {
-  const kept = Object.entries(sessions)
-    .sort(([, a], [, b]) => b.lastActivityAt - a.lastActivityAt)
-    .slice(0, MAX_SESSIONS);
+  const kept = Object.entries(sessions).sort(newestFirst).slice(0, MAX_SESSIONS);
   if (kept.length === 0) storage.removeItem(key);
   else storage.setItem(key, JSON.stringify(Object.fromEntries(kept)));
 }
@@ -117,23 +106,21 @@ function liveSessions({ storage, key }: SessionStore): Sessions {
 
 /** Whose session was active last, if any is live. */
 function latest(sessions: Sessions): string | undefined {
-  let found: string | undefined;
-  for (const owner in sessions) {
-    if (
-      found === undefined ||
-      sessions[owner]!.lastActivityAt > sessions[found]!.lastActivityAt
-    ) {
-      found = owner;
-    }
-  }
-  return found;
+  return Object.entries(sessions).sort(newestFirst)[0]?.[0];
+}
+
+function newestFirst(
+  [, a]: [string, StoredSession],
+  [, b]: [string, StoredSession],
+): number {
+  return b.lastActivityAt - a.lastActivityAt;
 }
 
 /**
- * A 53-bit hash of `subject` (cyrb53), enough to tell two users apart without storing
- * who either is.
+ * The key `subject`'s session is kept under, and that `borrowedFrom` names: a 53-bit hash
+ * of it (cyrb53), enough to tell two users apart without storing who either is.
  */
-function ownerHash(subject: string): string {
+export function sessionOwner(subject: string): string {
   let h1 = 0xdeadbeef;
   let h2 = 0x41c6ce57;
   for (let index = 0; index < subject.length; index++) {

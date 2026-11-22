@@ -1,7 +1,7 @@
 import { KiroraError, UserTokenError } from '../errors.js';
 import type { AuthenticationFailureReason, KiroraOptions } from '../types.js';
 import { base64UrlDecode } from '../utils/base64url.js';
-import { withTimeout } from '../utils/timeout.js';
+import { MAX_TIMER_MS, withTimeout } from '../utils/timeout.js';
 import { uuid } from '../utils/uuid.js';
 
 /** A `fetchUserToken` still unanswered after this counts as failed. */
@@ -10,8 +10,6 @@ const TOKEN_TIMEOUT_MS = 30_000;
 const REFRESH_AHEAD_MS = 60_000;
 /** A failed early refresh is tried again after this, while the token still works. */
 const REFRESH_RETRY_MS = 15_000;
-/** setTimeout's longest delay; a longer wait checks again then. */
-const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * One signed-in user. A new object each time the user changes, so work started for a
