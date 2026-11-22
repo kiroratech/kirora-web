@@ -53,6 +53,18 @@ export function releasePlan({ version, published, latest }) {
 }
 
 /**
+ * The versions and `latest` in `npm view <name> versions dist-tags --json`. npm 12 wraps
+ * the answer in an array, npm 11 doesn't; either is read the same.
+ */
+export function registryView(json) {
+  const [view = {}] = [].concat(JSON.parse(json));
+  return {
+    published: [].concat(view.versions ?? []),
+    latest: view['dist-tags']?.latest,
+  };
+}
+
+/**
  * The versions on npm and its `latest`. A package that was never published has none;
  * any other failure throws, rather than being mistaken for "not published yet".
  */
@@ -65,11 +77,7 @@ async function registryState(name) {
       'dist-tags',
       '--json',
     ]);
-    const view = JSON.parse(stdout);
-    return {
-      published: [].concat(view.versions ?? []),
-      latest: view['dist-tags']?.latest,
-    };
+    return registryView(stdout);
   } catch (error) {
     if (/E404/.test(`${error.stdout}${error.stderr}`)) {
       return { published: [], latest: undefined };
