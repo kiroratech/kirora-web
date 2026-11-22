@@ -2,13 +2,24 @@ import { describe, it, expect } from 'vitest';
 import { releasePlan } from './release-plan.mjs';
 
 describe('releasePlan', () => {
-  const plan = (version, published = [], latest = undefined, tag = undefined) => {
-    const { publish, distTag } = releasePlan({ version, tag, published, latest });
+  const plan = (version, published = [], latest = undefined) => {
+    const { publish, distTag } = releasePlan({ version, published, latest });
     return { publish, distTag };
   };
 
   it('publishes the first release as latest', () => {
     expect(plan('0.1.0')).toEqual({ publish: true, distTag: 'latest' });
+  });
+
+  it('makes the first release latest after the placeholder that created the package', () => {
+    expect(plan('0.1.0', ['0.0.0-stage'], undefined)).toEqual({
+      publish: true,
+      distTag: 'latest',
+    });
+    expect(plan('0.1.0', ['0.0.0-stage'], '0.0.0-stage')).toEqual({
+      publish: true,
+      distTag: 'latest',
+    });
   });
 
   it('makes a newer stable release latest', () => {
@@ -41,10 +52,5 @@ describe('releasePlan', () => {
       publish: false,
       distTag: undefined,
     });
-  });
-
-  it('refuses a tag that names another version', () => {
-    expect(() => plan('1.2.0', [], undefined, 'v1.2.1')).toThrow("doesn't match");
-    expect(plan('1.2.0', [], undefined, 'v1.2.0').publish).toBe(true);
   });
 });

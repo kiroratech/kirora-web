@@ -35,7 +35,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Decide whether and where to publish
         id: plan
-        # Fails if the tag doesn't match package.json, or npm can't be reached.
+        # Fails if npm can't be reached, rather than taking that for "not published yet".
         run: node scripts/release-plan.mjs
       - if: steps.plan.outputs.publish == 'true'
         run: pnpm install --frozen-lockfile
