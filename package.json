@@ -38,7 +38,12 @@
   "files": [
     "dist",
     "llms.txt",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs/authentication.md",
+    "docs/push.md",
+    "docs/reference.md",
+    "docs/script-tag.md",
+    "docs/tracking.md"
   ],
   "sideEffects": [
     "./dist/kirora-sw.js",

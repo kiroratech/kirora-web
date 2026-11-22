@@ -4,7 +4,7 @@
 > records tracking consent, and registers browsers for web push. This file tells an AI
 > coding agent how to install it in a developer's web app. Follow the steps in order and
 > ask the developer where a step says to. Everything you need is in this file; the
-> README.md next to it is the full reference.
+> README.md next to it, and the guides in docs/, are the full reference.
 
 ## Before you start: what you need from the developer
 
@@ -23,7 +23,7 @@ Use the project's package manager (look for `pnpm-lock.yaml`, `yarn.lock`,
 
     npm install @kirora/web
 
-No bundler? Use the script-tag snippet from the README instead, with an exact version.
+No bundler? Use the script-tag snippet from docs/script-tag.md instead, with an exact version.
 
 ## Step 2: add the token route on the server
 
@@ -98,7 +98,7 @@ In a module of its own, created once, outside components: `lib/kirora.ts`, or
       clientKey: process.env.NEXT_PUBLIC_KIRORA_CLIENT_KEY ?? '',
       fetchUserToken: async () => {
         const response = await fetch('/kirora-token');
-        // Throw on errors: the SDK keeps queued events and retries later.
+        // Throw on errors. If identify() then rejects, events stay queued; call it again later.
         if (!response.ok) throw new Error(`Token request failed: ${response.status}`);
         return response.text();
       },
