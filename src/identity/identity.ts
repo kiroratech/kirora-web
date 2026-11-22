@@ -41,6 +41,12 @@ export type SignedInUser = {
    * every call as them would be refused too, until identify() signs in again.
    */
   refused?: true;
+  /**
+   * Kirora accepted this sign-in's token on some request: the sign-in stands, whatever
+   * is refused later. Kept on the user, so a request finishing late for an earlier one
+   * can't speak for this one.
+   */
+  accepted?: true;
 };
 
 /**
@@ -71,8 +77,6 @@ export class Identity {
   private pendingRefresh: Promise<string> | null = null;
   /** Asks for a fresh token before the current one expires. */
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
-  /** The latest user whose token Kirora accepted: their sign-in stands. */
-  accepted: SignedInUser | null = null;
   /** The user whose token failure the app was told of, so it's told once. */
   private failureReported: SignedInUser | null = null;
   /**
@@ -205,7 +209,7 @@ export class Identity {
 
   /** Kirora accepted `user`'s token: a later failure is news again. */
   tokenAccepted(user: SignedInUser): void {
-    this.accepted = user;
+    user.accepted = true;
     if (this.failureReported === user) {
       this.failureReported = null;
     }

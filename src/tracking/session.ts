@@ -44,7 +44,7 @@ export function endSession(store: SessionStore, owner?: string): void {
   }
 
   const sessions = liveSessions(store);
-  delete sessions[sessionOwner(owner)];
+  delete sessions[claimedKey(sessions, owner)];
   save(store, sessions);
 }
 
@@ -62,12 +62,7 @@ export function touchSession(store: SessionStore, owner: string | null): Touched
   if (owner === null) {
     key = latest(sessions) ?? NO_ONE;
   } else {
-    key = sessionOwner(owner);
-    // The visit begun before sign-in is theirs now.
-    if (!sessions[key] && sessions[NO_ONE]) {
-      sessions[key] = sessions[NO_ONE];
-      delete sessions[NO_ONE];
-    }
+    key = claimedKey(sessions, owner);
   }
 
   const current = sessions[key];
@@ -88,13 +83,27 @@ export function touchSession(store: SessionStore, owner: string | null): Touched
  */
 export function keepSessionAlive(store: SessionStore, owner: string | null): void {
   const sessions = liveSessions(store);
-  const key = owner === null ? latest(sessions) : sessionOwner(owner);
+  const key = owner === null ? latest(sessions) : claimedKey(sessions, owner);
   if (key === undefined || !sessions[key]) {
     return;
   }
 
   sessions[key].lastActivityAt = Date.now();
   save(store, sessions);
+}
+
+/**
+ * The key of `owner`'s session in `sessions`. With none of their own yet, the visit
+ * begun before sign-in (as the page loaded) becomes theirs, so whatever they do next,
+ * keeping it alive or signing out, is done to that visit.
+ */
+function claimedKey(sessions: Sessions, owner: string): string {
+  const key = sessionOwner(owner);
+  if (!sessions[key] && sessions[NO_ONE]) {
+    sessions[key] = sessions[NO_ONE];
+    delete sessions[NO_ONE];
+  }
+  return key;
 }
 
 /** Saves the newest `MAX_SESSIONS` of `sessions`, or removes them all if there are none. */

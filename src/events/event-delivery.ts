@@ -406,7 +406,7 @@ export class EventDelivery {
       return;
     }
     this.adoption = undefined;
-    if (this.identity.accepted === user) {
+    if (user.accepted) {
       return;
     }
     this.queue

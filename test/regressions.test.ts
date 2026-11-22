@@ -440,3 +440,73 @@ it("keeps an event tracked while hidden after this tab's earlier clear, in order
   expect(storage.getItem('kirora:events:workspace')).toContain('"new"');
   expect(storage.getItem('kirora:events:workspace')).not.toContain('"old"');
 });
+
+it('keeps a sign-in Kirora accepted, though a late answer for an earlier user arrives after', async () => {
+  stubLocalStorage();
+  let releaseAda = () => {};
+  const adaHeld = new Promise<void>((resolve) => {
+    releaseAda = resolve;
+  });
+  let bobBatches: 'offline' | 'expired' = 'offline';
+  const sent = recordSends((url, init) => {
+    const user = userOf(init);
+    if (url.endsWith('/push-consent')) {
+      // Ada's consent call is slow, and answers only after Bob's token was accepted.
+      const answer = () => new Response(null, { status: 204 });
+      return user === 'ada' ? adaHeld.then(answer) : Promise.resolve(answer());
+    }
+    if (user === 'bob' && bobBatches === 'offline') {
+      return Promise.reject(new TypeError('Failed to fetch'));
+    }
+    if (user === 'bob' && bobBatches === 'expired') {
+      return Promise.resolve(new Response(null, { status: 401 }));
+    }
+    return undefined;
+  });
+  const kirora = client();
+
+  await kirora.identify(tokenFor('ada'));
+  const adaConsent = kirora.setPushConsent(true);
+  await kirora.logout();
+
+  // Bob signs in, adopting the event; Kirora accepts his token on a consent call.
+  kirora.track('Pre-login Browsing');
+  await kirora.identify(tokenFor('bob'));
+  await kirora.flush();
+  await kirora.setPushConsent(true);
+
+  // Ada's late answer arrives, then Bob's token expires.
+  releaseAda();
+  await adaConsent;
+  bobBatches = 'expired';
+  await kirora.flush();
+
+  // His sign-in still stands, so his events stay his, and go with his logout.
+  await kirora.logout();
+  await kirora.identify(tokenFor('carol'));
+  await kirora.flush();
+  expect(sent.filter(({ user }) => user === 'carol')).toEqual([]);
+  kirora.destroy();
+});
+
+it('keeps the visit begun as the page loaded alive once the user signs in', async () => {
+  const { keepSessionAlive, touchSession, endSession } =
+    await import('../src/tracking/session.js');
+  const storage = memoryStorage();
+  const store = { storage, key: 'kirora:session:test' };
+  vi.useFakeTimers({ toFake: ['Date'] });
+
+  // The page loads before sign-in, then Ada signs in and reads for 25 minutes.
+  const loaded = touchSession(store, null);
+  vi.advanceTimersByTime(25 * 60_000);
+  keepSessionAlive(store, 'ada');
+  vi.advanceTimersByTime(25 * 60_000);
+  expect(touchSession(store, 'ada')).toMatchObject({
+    sessionId: loaded.sessionId,
+    started: false,
+  });
+
+  // Her logout ends that visit.
+  endSession(store, 'ada');
+  expect(touchSession(store, null).started).toBe(true);
+});
