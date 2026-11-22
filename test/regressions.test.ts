@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { EventQueue } from '../src/events/event-queue.js';
 import { Kirora, type KiroraOptions } from '../src/index.js';
 import {
+  accepted,
   fakeKirora,
   kiroraRefusing,
   memoryStorage,
@@ -602,16 +603,147 @@ it('leaves no count of writes behind once the queue is cleared for good', async 
 it('never gives the next user the events of one who signed out without identify()', async () => {
   stubLocalStorage();
   const sent = recordSends();
-  // A reload where the app restored its own session: tracked, but never identified.
-  const kirora = client();
-  kirora.track('Report Exported');
+  const before = client({ trackSessions: true });
+  await before.identify(tokenFor('ada'));
+  before.track('Report Exported');
+  await before.flush();
+  before.destroy();
+
+  // A reload where the app restored Ada's session without identify(): her visit goes on.
+  const kirora = client({ trackSessions: true });
+  kirora.track('Invoice Viewed');
   await vi.waitFor(() =>
-    expect(localStorage.getItem(QUEUE_KEY)).toContain('Report Exported'),
+    expect(localStorage.getItem(QUEUE_KEY)).toContain('Invoice Viewed'),
   );
 
   await kirora.logout();
   await kirora.identify(tokenFor('bob'));
   await kirora.flush();
-  expect(sent.map(({ name }) => name)).not.toContain('Report Exported');
+  expect(sent.filter(({ user }) => user === 'bob').map(({ name }) => name)).not.toContain(
+    'Invoice Viewed',
+  );
+  kirora.destroy();
+});
+
+it("keeps a plain visitor's events through logout() with nobody signed in", async () => {
+  stubLocalStorage();
+  const sent = recordSends();
+  // An app calling logout() on an anonymous page, where nobody ever signed in.
+  const kirora = client({ trackSessions: true });
+  kirora.track('Pricing Viewed');
+  await vi.waitFor(() =>
+    expect(localStorage.getItem(QUEUE_KEY)).toContain('Pricing Viewed'),
+  );
+
+  await kirora.logout();
+  // The visitor signs up: their funnel is theirs.
+  await kirora.identify(tokenFor('bob'));
+  await kirora.flush();
+  expect(sent.filter(({ user }) => user === 'bob').map(({ name }) => name)).toContain(
+    'Pricing Viewed',
+  );
+  kirora.destroy();
+});
+
+it('never sends more than a batch takes, past events another user still has on their way', async () => {
+  stubLocalStorage();
+  const batchSizes: [string | undefined, number][] = [];
+  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
+    const batch = JSON.parse(String(init.body)) as {
+      events: { idempotencyKey: string }[];
+    };
+    batchSizes.push([userOf(init), batch.events.length]);
+    // Ada's never come back: they stay on their way.
+    return userOf(init) === 'ada'
+      ? new Promise(() => undefined)
+      : Promise.resolve(accepted(batch));
+  });
+  const kirora = client();
+  await kirora.identify(tokenFor('ada'));
+  for (let index = 0; index < 100; index++) {
+    kirora.track(`Ada ${index}`);
+  }
+  await vi.waitFor(() => expect(batchSizes).toHaveLength(1));
+
+  // Bob signs in while Ada's 100 are still on their way, and tracks 150.
+  await kirora.identify(tokenFor('bob'));
+  for (let index = 0; index < 150; index++) {
+    kirora.track(`Bob ${index}`);
+  }
+  await vi.waitFor(() => expect(batchSizes.some(([user]) => user === 'bob')).toBe(true));
+  await kirora.flush();
+
+  const bobs = batchSizes.filter(([user]) => user === 'bob').map(([, size]) => size);
+  expect(Math.max(...bobs)).toBeLessThanOrEqual(100);
+  kirora.destroy();
+});
+
+it("stops continuing a signed-out user's session after logout() with nobody signed in", async () => {
+  stubLocalStorage();
+  const server = fakeKirora();
+  const before = client({ trackSessions: true });
+  await before.identify(tokenFor('ada'));
+  before.track('Report Exported');
+  await before.flush();
+  const adaSession = sentEvents(server.handled).find(
+    ({ name }) => name === 'Report Exported',
+  )!.sessionId;
+  before.destroy();
+
+  // A reload where the app restored its own session, then logs out before identify().
+  const reloaded = client({ trackSessions: true });
+  await reloaded.logout();
+  reloaded.track('After Logout');
+  await vi.waitFor(() =>
+    expect(localStorage.getItem(QUEUE_KEY)).toContain('After Logout'),
+  );
+
+  const queued = JSON.parse(localStorage.getItem(QUEUE_KEY)!) as {
+    event: { name: string; context: { sessionId?: string } };
+  }[];
+  const afterLogout = queued.find(({ event }) => event.name === 'After Logout')!;
+  expect(afterLogout.event.context.sessionId).not.toBe(adaSession);
+  reloaded.destroy();
+});
+
+it('clears the count of writes everywhere, so no tab waits for it after a clear', async () => {
+  vi.stubGlobal('navigator', {});
+  stubIndexedDB();
+  // Loaded afresh: the lock keeps its IndexedDB connection for the page's life.
+  vi.resetModules();
+  const { readRevision } = await import('../src/storage/cross-tab-lock.js');
+  const { EventQueue: FreshQueue } = await import('../src/events/event-queue.js');
+  const queue = new FreshQueue(memoryStorage(), 'workspace');
+  await queue.add(
+    { idempotencyKey: 'a', name: 'A', properties: {}, occurredAt: '', context: {} },
+    null,
+  );
+  expect(await readRevision('kirora:events:workspace')).toBeGreaterThan(0);
+  await queue.clearAll();
+  expect(await readRevision('kirora:events:workspace')).toBe(0);
+});
+
+it('leaves a pending detachment alone where apiUrl is unusable', async () => {
+  stubLocalStorage();
+  localStorage.setItem(
+    'kirora:push-pending-detach:kirora_pk_test@not a url',
+    JSON.stringify({
+      installationId: 'device',
+      deviceSecret: 'secret',
+      giveUpAt: Date.now() + 60_000,
+    }),
+  );
+  const requests: string[] = [];
+  vi.stubGlobal('fetch', (url: string) => {
+    requests.push(url);
+    return Promise.resolve(new Response(null, { status: 204 }));
+  });
+  const timers = vi.spyOn(globalThis, 'setTimeout');
+  const kirora = client({ apiUrl: 'not a url' });
+  await tick(20);
+  expect(requests).toEqual([]);
+  // No retry, 30 seconds or more away, that could only fail again.
+  const retries = timers.mock.calls.filter(([, delay]) => Number(delay) >= 30_000);
+  expect(retries).toEqual([]);
   kirora.destroy();
 });

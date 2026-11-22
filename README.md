@@ -156,7 +156,13 @@ never gets them. Events tracked while it runs go to whoever signs in next.
 
 With nobody signed in (a reload where your app restored its session but `identify()`
 hasn't run yet), `logout()` still detaches this browser, with a device secret Kirora gave
-it when it registered: an API credential that can only detach that registration.
+it when it registered: an API credential that can only detach that registration. It
+leaves the registration alone while its user is signed in in another tab (each tab holds
+a Web Lock for its user; in browsers without Web Locks, before Firefox 96 and Safari
+15.4, it can't tell, so it leaves it alone too). Of the events waiting, it drops only those
+that went on a signed-in user's visit, as a restored session's do: a visitor who never
+signed in keeps theirs, for when they sign up. Call `logout()` when a user signs out,
+not on every page where nobody is signed in.
 
 If Kirora can't be told, the SDK cancels the browser's push subscription and keeps
 retrying the detachment in the background, for up to a day, with the user's token while

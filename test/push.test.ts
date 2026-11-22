@@ -886,3 +886,21 @@ it('carries on with a detachment still being retried after a reload, by its secr
   await vi.waitFor(() => expect(localStorage.getItem(PENDING_DETACH_KEY)).toBeNull());
   next.destroy();
 });
+
+it("never signs another tab's signed-in user out of push from logout() with nobody signed in", async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  // Alice is signed in in one tab.
+  const aliceTab = pushClient();
+  await aliceTab.identify(tokenFor('alice'));
+
+  // Another tab, where nobody is signed in, calls logout() (an anonymous page, say).
+  const otherTab = pushClient();
+  await otherTab.logout();
+
+  expect(detaches(server.handled)).toEqual([]);
+  expect(savedRegistration()).toBe('alice');
+  aliceTab.destroy();
+  otherTab.destroy();
+});

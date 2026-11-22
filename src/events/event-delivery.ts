@@ -231,7 +231,7 @@ export class EventDelivery {
       const wanted = maxEvents + this.inFlight.size;
       const oldest = await this.queue.oldest(wanted, user.subject, hidden);
       // Marked as on their way in the same step, before another send can read them.
-      const { batch, bytes } = this.nextBatch(oldest, hidden);
+      const { batch, bytes } = this.nextBatch(oldest, maxEvents, hidden);
 
       // Consent may have been withdrawn, or the user changed, while the queue was read.
       if (batch.length === 0 || !mayStillSend()) {
@@ -275,12 +275,14 @@ export class EventDelivery {
    */
   private nextBatch(
     oldest: QueuedEvent[],
+    maxEvents: number,
     hidden: boolean,
   ): { batch: QueuedEvent[]; bytes: number } {
     const notInFlight = oldest.filter(
       (event) => !this.inFlight.has(event.idempotencyKey),
     );
-    return fitBatch(notInFlight, hidden, this.keepaliveBytes);
+    // Read extra to skip those in flight, but never more than a batch takes.
+    return fitBatch(notInFlight.slice(0, maxEvents), hidden, this.keepaliveBytes);
   }
 
   /**

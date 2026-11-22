@@ -1,3 +1,4 @@
+import { signedInElsewhere } from '../identity/signed-in-elsewhere.js';
 import type { NotificationTaps } from './notification-taps.js';
 import { SDK_NAME, type ClientApi } from '../api/client-api.js';
 import type { Identity, SignedInUser } from '../identity/identity.js';
@@ -479,12 +480,20 @@ export class WebPush {
    * `detach()` otherwise.
    */
   detachBySecret(deadline?: number): Promise<void> {
-    return this.oneAtATime(() => {
+    return this.oneAtATime(async () => {
       const last = this.lastRegistration();
-      if (!last?.deviceSecret) {
-        return Promise.resolve();
+      // Without a usable apiUrl there's nowhere to send it.
+      if (!last?.deviceSecret || this.api.apiUrl === undefined || !last.userSubject) {
+        return;
       }
-      return this.startCleanup(last, undefined, deadline);
+
+      // The registration is every tab's: while its user is signed in in another one,
+      // or that can't be told, it isn't this logout's to undo.
+      const elsewhere = await signedInElsewhere(this.api.namespace, last.userSubject);
+      if (elsewhere !== false) {
+        return;
+      }
+      await this.startCleanup(last, undefined, deadline);
     });
   }
 
@@ -517,7 +526,8 @@ export class WebPush {
    */
   resumePendingDetach(): void {
     const pending = readJson(this.storage, this.pendingDetachKey) as PendingDetach | null;
-    if (!pending) {
+    // Kept for a page whose apiUrl works: retrying here would only fail all day.
+    if (!pending || this.api.apiUrl === undefined) {
       return;
     }
     const usable =

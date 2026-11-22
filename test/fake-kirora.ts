@@ -157,6 +157,7 @@ export function stubWebPush(subscribing: Promise<void> = Promise.resolve()) {
   vi.stubGlobal('location', new URL('https://example.com/'));
   vi.stubGlobal('navigator', {
     language: 'en',
+    locks: fakeLocks(),
     serviceWorker: {
       getRegistration: () => Promise.resolve(registration),
       register: () => Promise.resolve(registration),
@@ -164,6 +165,55 @@ export function stubWebPush(subscribing: Promise<void> = Promise.resolve()) {
   });
   vi.stubGlobal('PushManager', class {});
   vi.stubGlobal('Notification', { permission: 'granted' });
+}
+
+/**
+ * Web Locks of this test's own, as Node's are shared by every test in a file: exclusive
+ * requests for a name run one at a time, shared ones side by side, and `query()` says
+ * which are held.
+ */
+export function fakeLocks() {
+  const held = new Map<string, number>();
+  const tails = new Map<string, Promise<unknown>>();
+
+  const hold = async <Result>(name: string, operation: () => Promise<Result>) => {
+    held.set(name, (held.get(name) ?? 0) + 1);
+    try {
+      return await operation();
+    } finally {
+      const count = (held.get(name) ?? 1) - 1;
+      if (count === 0) {
+        held.delete(name);
+      } else {
+        held.set(name, count);
+      }
+    }
+  };
+
+  return {
+    request<Result>(
+      name: string,
+      optionsOrOperation: { mode?: 'shared' | 'exclusive' } | (() => Promise<Result>),
+      maybeOperation?: () => Promise<Result>,
+    ): Promise<Result> {
+      const operation =
+        typeof optionsOrOperation === 'function' ? optionsOrOperation : maybeOperation!;
+      const shared =
+        typeof optionsOrOperation === 'object' && optionsOrOperation.mode === 'shared';
+      if (shared) {
+        return hold(name, operation);
+      }
+      const previous = tails.get(name) ?? Promise.resolve();
+      const run = previous.then(() => hold(name, operation));
+      tails.set(
+        name,
+        run.catch(() => undefined),
+      );
+      return run;
+    },
+    query: () =>
+      Promise.resolve({ held: [...held.keys()].map((name) => ({ name })), pending: [] }),
+  };
 }
 
 /** The VAPID public key of the fake Kirora's push app, base64url: the bytes 1, 2, 3. */

@@ -14,12 +14,22 @@ const OPEN_TIMEOUT_MS = 3000;
 
 /** One connection, opened on first use and kept. */
 let connection: Promise<IDBDatabase> | undefined;
+/** The IndexedDB `connection` was opened with. */
+let openedWith: IDBFactory | undefined;
 /** Set once opening hung: this page runs unlocked rather than waiting again. */
 let stalled = false;
 
 function openDatabase(): Promise<IDBDatabase> {
+  if (typeof indexedDB === 'undefined') {
+    return Promise.reject(new LockUnavailable('no IndexedDB'));
+  }
   if (stalled) {
     return Promise.reject(new LockUnavailable('IndexedDB never opened'));
+  }
+  // A connection belongs to the IndexedDB that opened it, which a page never replaces.
+  if (openedWith !== indexedDB) {
+    connection = undefined;
+    openedWith = indexedDB;
   }
   connection ??= new Promise<IDBDatabase>((resolve, reject) => {
     // Throws where IndexedDB is missing or refused, before any timer is set.
@@ -71,6 +81,17 @@ export async function readRevision(name: string): Promise<number> {
     const request = database.transaction(STORE).objectStore(STORE).get(name);
     request.onsuccess = () => resolve(revisionOf(request.result));
     request.onerror = () => reject(new LockUnavailable(String(request.error)));
+  });
+}
+
+/** Forgets the revision under `name`, as its queue is cleared for good. */
+export async function forgetRevision(name: string): Promise<void> {
+  const database = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(STORE, 'readwrite');
+    transaction.objectStore(STORE).delete(name);
+    transaction.oncomplete = () => resolve();
+    transaction.onabort = () => reject(new LockUnavailable(String(transaction.error)));
   });
 }
 

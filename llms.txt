@@ -169,6 +169,7 @@ takes over and the previous user's unsent events are never sent as the new one. 
 `identify()` runs on every page load while signed in, including when the app restores its
 own session: `logout()` then drops the events from before sign-in and detaches the
 browser (with nobody identified, by the device secret Kirora gave it at registration).
+Call `logout()` only from the app's sign-out, never on pages where nobody is signed in.
 
 ## Step 5: track events
 

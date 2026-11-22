@@ -1,6 +1,7 @@
 import { isPageHidden } from '../utils/page-hidden.js';
 import type { KeyValueStorage } from '../storage/device-storage.js';
 import {
+  forgetRevision,
   LockUnavailable,
   readRevision,
   withCrossTabLock,
@@ -262,16 +263,25 @@ export class EventQueue {
     );
   }
 
-  /** The idempotency keys of the events waiting from before sign-in, as of now. */
-  unboundKeys(): Promise<Set<string>> {
+  /**
+   * The idempotency keys of the events waiting from before sign-in, as of now: `all`
+   * of them, and those `borrowed` from a signed-in user's session, as a reload before
+   * `identify()` tracks them.
+   */
+  unboundKeys(): Promise<{ all: Set<string>; borrowed: Set<string> }> {
     return this.inTurn(() => {
-      const keys = new Set<string>();
+      const all = new Set<string>();
+      const borrowed = new Set<string>();
       for (const stored of this.read()) {
-        if (stored.owner === null) {
-          keys.add(stored.event.idempotencyKey);
+        if (stored.owner !== null) {
+          continue;
+        }
+        all.add(stored.event.idempotencyKey);
+        if (stored.sessionOwner !== undefined) {
+          borrowed.add(stored.event.idempotencyKey);
         }
       }
-      return keys;
+      return { all, borrowed };
     });
   }
 
@@ -288,7 +298,9 @@ export class EventQueue {
   /** Forgets every event, and the count of writes kept beside them: nothing is left. */
   async clearAll(): Promise<void> {
     await this.keep(() => false);
+    // Both copies, or every tab would wait for a revision `localStorage` no longer shows.
     this.storage.removeItem(this.revisionKey);
+    await forgetRevision(this.key).catch(() => undefined);
   }
 
   /**
