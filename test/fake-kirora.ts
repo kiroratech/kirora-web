@@ -195,6 +195,19 @@ export function fakeKirora(
   const requests: SentRequest[] = [];
   const handled: SentRequest[] = [];
   const held: (() => void)[] = [];
+  const server = {
+    requests,
+    handled,
+    held,
+    /** Answers every held call. */
+    release: () => held.splice(0).forEach((answer) => answer()),
+    /**
+     * Set to answer a call before the usual answers (a refusal, or a rejection for a
+     * network failure); undefined lets the usual answer through. Recorded as handled.
+     */
+    answerFirst: undefined as
+      ((request: SentRequest) => Promise<Response> | undefined) | undefined,
+  };
   vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
     const request: SentRequest = {
       method: init.method ?? 'GET',
@@ -205,6 +218,11 @@ export function fakeKirora(
       body: init.body ? JSON.parse(String(init.body)) : undefined,
     };
     requests.push(request);
+    const first = server.answerFirst?.(request);
+    if (first) {
+      handled.push(request);
+      return first;
+    }
     const answer = () => {
       handled.push(request);
       if (request.path === '/events/batch') {
@@ -235,13 +253,7 @@ export function fakeKirora(
     }
     return new Promise<Response>((resolve) => held.push(() => resolve(answer())));
   });
-  return {
-    requests,
-    handled,
-    held,
-    /** Answers every held call. */
-    release: () => held.splice(0).forEach((answer) => answer()),
-  };
+  return server;
 }
 
 /** A client with push on and sessions off, logging nothing: what push tests start from. */

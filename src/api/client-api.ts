@@ -96,14 +96,12 @@ export class ClientApi {
       throw refusal();
     }
     await this.identity.tokenReady(user);
+    const { apiUrl } = this;
+    const sendWith = (token: string) =>
+      this.send(apiUrl, method, path, `Bearer ${token}`, options);
+
     const sentToken = user.token;
-    const answer = await this.send(
-      this.apiUrl,
-      method,
-      path,
-      `Bearer ${sentToken}`,
-      options,
-    );
+    const answer = await sendWith(sentToken);
     if (answer !== REFUSED) {
       return this.accepted(user, answer as Data | undefined);
     }
@@ -111,13 +109,7 @@ export class ClientApi {
     // Kirora refused the token: get a fresh one, once, and try again with it.
     const freshToken = await this.identity.refresh(user, sentToken);
     if (freshToken) {
-      const retried = await this.send(
-        this.apiUrl,
-        method,
-        path,
-        `Bearer ${freshToken}`,
-        options,
-      );
+      const retried = await sendWith(freshToken);
       if (retried !== REFUSED) {
         return this.accepted(user, retried as Data | undefined);
       }

@@ -1,5 +1,5 @@
 import { ClientApi } from './api/client-api.js';
-import { asKiroraError, KiroraApiError, KiroraError, UserTokenError } from './errors.js';
+import { asKiroraError, isTokenRefusal, KiroraError, UserTokenError } from './errors.js';
 import { EventDelivery } from './events/event-delivery.js';
 import { EventQueue, type QueuedEvent } from './events/event-queue.js';
 import { Identity, isUnnamedSubject } from './identity/identity.js';
@@ -232,18 +232,9 @@ export class Kirora {
     }
     const deadline = Date.now() + LOGOUT_DEADLINE_MS;
 
-    // Whoever signs out tracked the events waiting from before sign-in, so the next user
-    // to sign in must not adopt them. Noted now, so events tracked during this logout,
-    // which wait for the next user, are kept; dropped once a sign-in under way has
-    // settled, as it adopts those it can, for the user signing out.
-    const unboundBefore = this.queue.unboundKeys().catch(() => new Set<string>());
-    const dropUnbound = async () => {
-      try {
-        await this.queue.removeUnbound(await unboundBefore);
-      } catch (error) {
-        this.log('error', "Couldn't clear events", error);
-      }
-    };
+    // The events waiting from before sign-in, noted now: events tracked during this
+    // logout aren't among them, and wait for the next user.
+    const waitingBefore = this.queue.unboundKeys().catch(() => new Set<string>());
 
     // Who this logout is for is decided by what came before it, never by an identify()
     // called after it.
@@ -265,8 +256,10 @@ export class Kirora {
     if (!user) {
       // Nobody signed in, as after a reload where the app restored its own session: the
       // device's last registration is still detached, by its device secret.
-      await settledBy(this.push.detach(null, deadline), deadline);
-      await dropUnbound();
+      await Promise.all([
+        settledBy(this.push.detachBySecret(deadline), deadline),
+        this.dropEventsFromBeforeSignIn(waitingBefore),
+      ]);
       return;
     }
     this.identity.signingOut(user);
@@ -283,7 +276,7 @@ export class Kirora {
           "Gave up waiting for Kirora; the user's unsent events are dropped",
         );
       }
-      await dropUnbound();
+      await this.dropEventsFromBeforeSignIn(waitingBefore);
       const signedOut = this.identity.signOut(user);
       // Anything left is this user's, so it never goes as the next one; but if they
       // signed in again meanwhile, it's theirs to send.
@@ -291,7 +284,7 @@ export class Kirora {
         await this.queue.clearOwnedBy((owner) => owner === user.subject);
       }
       if (signedOut) {
-        this.tracker.endSession(user.subject);
+        this.tracker.signedOut(user.subject);
       }
       // Kept past a consent withdrawal only so this browser could be detached.
       if (this.consent.refused) {
@@ -446,6 +439,20 @@ export class Kirora {
   }
 
   /**
+   * Drops those of `waiting` still waiting from before sign-in, as a user signs out:
+   * whoever signed out tracked them, so the next user to sign in must not adopt them. Run
+   * once a sign-in under way has settled, as it adopts those it can, for the user signing
+   * out. Never rejects.
+   */
+  private async dropEventsFromBeforeSignIn(waiting: Promise<Set<string>>): Promise<void> {
+    try {
+      await this.queue.removeUnbound(await waiting);
+    } catch (error) {
+      this.log('error', "Couldn't clear events", error);
+    }
+  }
+
+  /**
    * Forgets events left by earlier sign-ins with tokens naming no one: they'd otherwise
    * wait for good, crowding out the events that can go. Only once they're old, as another
    * tab may still be signed in to send them. Never `subject`'s, who signed in now.
@@ -482,8 +489,7 @@ export class Kirora {
     try {
       await this.push.register();
     } catch (error) {
-      const tokenRefused = error instanceof KiroraApiError && error.status === 401;
-      if (tokenRefused || error instanceof UserTokenError) {
+      if (isTokenRefusal(error) || error instanceof UserTokenError) {
         throw error;
       }
       this.log('error', 'Push registration failed', error);

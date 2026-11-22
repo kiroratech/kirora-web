@@ -57,23 +57,17 @@ export function endSession(store: SessionStore, owner?: string): void {
  * Activity with no one signed in (a page loading before `identify()`) continues the
  * latest live session, whoever's: a reload doesn't end a signed-in user's visit. Such a
  * session is `borrowedFrom` that user, so it's left out of the events if someone else
- * adopts them. A session begun before sign-in becomes the user's who signs in. With
- * `borrow` false (after a sign-out in this tab), activity with no one signed in never
+ * adopts them. A session begun before sign-in becomes the user's who signs in. Without
+ * `mayBorrow` (after a sign-out in this tab), activity with no one signed in never
  * continues someone else's session.
  */
 export function touchSession(
   store: SessionStore,
   owner: string | null,
-  borrow = true,
+  { mayBorrow }: Borrowing = { mayBorrow: true },
 ): TouchedSession {
   const sessions = liveSessions(store);
-
-  let key: string;
-  if (owner === null) {
-    key = borrow ? (latest(sessions) ?? NO_ONE) : NO_ONE;
-  } else {
-    key = claimedKey(sessions, owner);
-  }
+  const key = sessionKey(sessions, owner, mayBorrow);
 
   const current = sessions[key];
   const sessionId = current ? current.sessionId : uuid();
@@ -94,22 +88,41 @@ export function touchSession(
 export function keepSessionAlive(
   store: SessionStore,
   owner: string | null,
-  borrow = true,
+  { mayBorrow }: Borrowing = { mayBorrow: true },
 ): void {
   const sessions = liveSessions(store);
-  let key: string | undefined;
-  if (owner !== null) {
-    key = claimedKey(sessions, owner);
-  } else {
-    key = borrow ? latest(sessions) : NO_ONE;
-  }
-  const current = key === undefined ? undefined : sessions[key];
+  const current = sessions[sessionKey(sessions, owner, mayBorrow)];
   if (!current) {
     return;
   }
 
   current.lastActivityAt = Date.now();
   save(store, sessions);
+}
+
+/**
+ * Whether activity with no one signed in may continue someone else's live session, as a
+ * page loading before `identify()` does; not after a sign-out in the same tab.
+ */
+export type Borrowing = { mayBorrow: boolean };
+
+/**
+ * The key of the session activity by `owner` goes on: their own (see `claimedKey`), or
+ * with no one signed in, the latest live session if it `mayBorrow`, and otherwise the
+ * one begun before sign-in.
+ */
+function sessionKey(
+  sessions: Sessions,
+  owner: string | null,
+  mayBorrow: boolean,
+): string {
+  if (owner !== null) {
+    return claimedKey(sessions, owner);
+  }
+  if (mayBorrow) {
+    return latest(sessions) ?? NO_ONE;
+  }
+  return NO_ONE;
 }
 
 /**

@@ -17,6 +17,7 @@ afterEach(() => {
 });
 
 const REGISTRATION_KEY = 'kirora:push-registration:kirora_pk_a@api.kirora.io';
+const PENDING_DETACH_KEY = 'kirora:push-pending-detach:kirora_pk_a@api.kirora.io';
 
 /** Who Kirora was told owns this browser, in order: a user for a PUT, `-user` for a DELETE. */
 function deviceChanges(requests: SentRequest[]) {
@@ -849,25 +850,14 @@ it("goes on with the device secret when Kirora refuses the user's token to detac
   const kirora = pushClient();
   await kirora.identify(tokenFor('alice'));
 
-  const kiroraFetch = globalThis.fetch;
-  vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
-    const bearer = new Headers(init.headers).get('authorization')?.startsWith('Bearer');
-    if (init.method === 'DELETE' && bearer) {
-      server.handled.push({
-        method: 'DELETE',
-        path: new URL(url).pathname,
-        user: 'alice',
-        authorization: 'Bearer (refused)',
-        search: '',
-      });
-      return Promise.resolve(new Response(null, { status: 401 }));
-    }
-    return kiroraFetch(url, init);
-  });
+  server.answerFirst = (request) =>
+    request.method === 'DELETE' && request.authorization?.startsWith('Bearer')
+      ? Promise.resolve(new Response(null, { status: 401 }))
+      : undefined;
   await kirora.logout();
 
   const sent = detaches(server.handled);
-  expect(sent[0]).toBe('Bearer (refused) ');
+  expect(sent[0]).toMatch(/^Bearer /);
   expect(sent.at(-1)).toMatch(/^Device secret-1 /);
 });
 
@@ -879,27 +869,20 @@ it('carries on with a detachment still being retried after a reload, by its secr
   await kirora.identify(tokenFor('alice'));
 
   // Kirora can't be reached as Alice logs out: the detachment is left to retry.
-  const kiroraFetch = globalThis.fetch;
-  vi.stubGlobal('fetch', (url: string, init: RequestInit) =>
-    init.method === 'DELETE'
+  server.answerFirst = (request) =>
+    request.method === 'DELETE'
       ? Promise.reject(new TypeError('Failed to fetch'))
-      : kiroraFetch(url, init),
-  );
+      : undefined;
   await kirora.logout();
   kirora.destroy();
-  expect(
-    localStorage.getItem('kirora:push-pending-detach:kirora_pk_a@api.kirora.io'),
-  ).toContain('secret-1');
+  expect(localStorage.getItem(PENDING_DETACH_KEY)).toContain('secret-1');
 
   // The next page, back online.
-  vi.stubGlobal('fetch', kiroraFetch);
+  server.answerFirst = undefined;
+  server.handled.length = 0;
   const next = pushClient();
   await vi.waitFor(() => expect(detaches(server.handled)).toHaveLength(1));
   expect(detaches(server.handled)[0]).toMatch(/^Device secret-1 /);
-  await vi.waitFor(() =>
-    expect(
-      localStorage.getItem('kirora:push-pending-detach:kirora_pk_a@api.kirora.io'),
-    ).toBeNull(),
-  );
+  await vi.waitFor(() => expect(localStorage.getItem(PENDING_DETACH_KEY)).toBeNull());
   next.destroy();
 });

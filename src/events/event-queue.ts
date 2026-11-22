@@ -464,12 +464,10 @@ export class EventQueue {
     }
 
     const giveUpAt = Date.now() + MAX_CATCH_UP_MS;
+    // A page fallen back to memory has nothing to catch up with, as above.
+    const shared = this.storage.persistent !== false;
     const runIfCaughtUp = (latest: number) => {
-      // A page fallen back to memory has nothing to catch up with, as above.
-      const behind =
-        this.storage.persistent !== false &&
-        this.revision() < latest &&
-        Date.now() < giveUpAt;
+      const behind = shared && this.revision() < latest && Date.now() < giveUpAt;
       if (behind) {
         return undefined;
       }

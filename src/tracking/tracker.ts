@@ -74,20 +74,23 @@ export class Tracker {
   keepSessionAlive(): void {
     this.safely(() => {
       if (this.sessionsOn) {
-        sessions.keepSessionAlive(this.sessionStore, this.owner(), !this.signedOutHere);
+        sessions.keepSessionAlive(this.sessionStore, this.owner(), this.borrowing());
       }
     });
   }
 
+  /** Ends every session, as when consent is withdrawn. */
+  endSession(): void {
+    this.safely(() => sessions.endSession(this.sessionStore));
+  }
+
   /**
-   * Ends `owner`'s session, so their next activity starts another: for a sign-out. With
-   * no owner, ends every session.
+   * `subject` signed out in this tab: their session ends, and activity here is no one's
+   * until the next sign-in, never continuing another user's live session.
    */
-  endSession(owner?: string): void {
-    if (owner !== undefined) {
-      this.signedOutHere = true;
-    }
-    this.safely(() => sessions.endSession(this.sessionStore, owner));
+  signedOut(subject: string): void {
+    this.signedOutHere = true;
+    this.safely(() => sessions.endSession(this.sessionStore, subject));
   }
 
   /** Forgets queued events and the session, as when consent is withdrawn. */
@@ -150,10 +153,11 @@ export class Tracker {
       return undefined;
     }
 
+    // Signed in again: activity is someone's.
     if (owner !== null) {
       this.signedOutHere = false;
     }
-    const session = sessions.touchSession(this.sessionStore, owner, !this.signedOutHere);
+    const session = sessions.touchSession(this.sessionStore, owner, this.borrowing());
     if (session.started) {
       page ??= pageContext();
       const properties = sessionStartedProperties(page);
@@ -173,6 +177,11 @@ export class Tracker {
     } catch (error) {
       this.parts.log('error', 'Kirora failed', error);
     }
+  }
+
+  /** Whether activity here may continue another user's live session (see `Borrowing`). */
+  private borrowing(): sessions.Borrowing {
+    return { mayBorrow: !this.signedOutHere };
   }
 
   /** Sessions are on, and tracking is allowed. */

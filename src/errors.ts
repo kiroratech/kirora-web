@@ -59,6 +59,11 @@ export function retryAfterOf(error: unknown): number {
   return 0;
 }
 
+/** @internal A 401: Kirora refused the credential the call was sent with. */
+export function isTokenRefusal(error: unknown): boolean {
+  return error instanceof KiroraApiError && error.status === 401;
+}
+
 /**
  * @internal A 404 or 409: Kirora's final word on a device change, not a failure to retry.
  */
