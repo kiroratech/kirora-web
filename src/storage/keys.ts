@@ -16,6 +16,12 @@ export const STORAGE_KEYS = {
   /** Who this browser was last registered for push as. */
   pushRegistration: (namespace: string) => `kirora:push-registration:${namespace}`,
   /**
+   * This browser's device secret, made once, as long-lived as its device id: it lets the
+   * browser be detached from push with nobody signed in. Kept on this device only, never
+   * in a cookie, which would send it with every request to the site.
+   */
+  deviceSecret: (namespace: string) => `kirora:device-secret:${namespace}`,
+  /**
    * A detachment still being retried, with the device secret it goes with, so a reload
    * carries on with it (within the day from the sign-out).
    */

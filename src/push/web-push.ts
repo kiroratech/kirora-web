@@ -12,7 +12,7 @@ import {
 import { readJson, type KeyValueStorage } from '../storage/device-storage.js';
 import { STORAGE_KEYS } from '../storage/keys.js';
 import { localeAndTimezone } from '../tracking/page-context.js';
-import { base64UrlBytes } from '../utils/base64url.js';
+import { base64UrlBytes, base64UrlEncode } from '../utils/base64url.js';
 import { withTimeout } from '../utils/timeout.js';
 import {
   forgetSubscription,
@@ -43,18 +43,12 @@ type PushRegistration = {
   /** Kirora's, from its answer: a denial names it. Missing from older records. */
   pushAppId?: string;
   lastSeenAt?: string;
-  /**
-   * Kirora's, from its answer: detaches this registration with nobody signed in (a reload
-   * where the app restored its own session, or a retry after one). Missing from older
-   * records.
-   */
-  deviceSecret?: string;
   /** Set once Kirora was told permission is denied. */
   denied?: true;
 };
 
 /** What Kirora answers to `PUT /devices/{id}`. */
-type DeviceAnswer = { lastSeenAt?: string; deviceSecret?: string } | undefined;
+type DeviceAnswer = { lastSeenAt?: string } | undefined;
 
 /** A detachment still being retried, kept so a reload carries on with it. */
 type PendingDetach = {
@@ -114,6 +108,8 @@ export class WebPush {
   private readonly registrationKey: string;
   /** Where a detachment still being retried is kept, for a reload to carry on with. */
   private readonly pendingDetachKey: string;
+  /** Where this browser's device secret is kept (see `deviceSecret()`). */
+  private readonly deviceSecretKey: string;
   /** Set while `setPushEnabled(false)` holds. */
   private readonly disabledKey: string;
   private readonly serviceWorkerUrl: string;
@@ -136,6 +132,7 @@ export class WebPush {
     this.registrationKey = STORAGE_KEYS.pushRegistration(api.namespace);
     this.disabledKey = STORAGE_KEYS.pushDisabled(api.namespace);
     this.pendingDetachKey = STORAGE_KEYS.pushPendingDetach(api.namespace);
+    this.deviceSecretKey = STORAGE_KEYS.deviceSecret(api.namespace);
     this.serviceWorkerUrl = options?.serviceWorkerUrl ?? DEFAULT_SERVICE_WORKER_URL;
   }
 
@@ -334,7 +331,6 @@ export class WebPush {
       at: Date.now(),
       pushAppId: pushApp.pushAppId,
       lastSeenAt: answer?.lastSeenAt,
-      deviceSecret: answer?.deviceSecret,
     };
     this.storage.setItem(this.registrationKey, JSON.stringify(registration));
     this.log('debug', `Registered this browser with ${pushApp.name}`);
@@ -350,7 +346,9 @@ export class WebPush {
   ): Promise<DeviceAnswer | undefined> {
     return this.api.request<DeviceAnswer>('PUT', `/devices/${this.installationId()}`, {
       as: user,
-      body: { ...body, ...localeAndTimezone() },
+      // The secret goes with every registration: it can detach the device later with
+      // nobody signed in.
+      body: { ...body, deviceSecret: this.deviceSecret(), ...localeAndTimezone() },
     });
   }
 
@@ -431,9 +429,8 @@ export class WebPush {
       ...last,
       userSubject: user.subject,
       at: Date.now(),
-      // A denial that moved the device to this user advances it, with a secret of its own.
+      // A denial that moved the device to this user advances it.
       lastSeenAt: answer?.lastSeenAt ?? last.lastSeenAt,
-      deviceSecret: answer?.deviceSecret ?? last.deviceSecret,
       denied: true,
     };
     this.storage.setItem(this.registrationKey, JSON.stringify(denial));
@@ -482,8 +479,13 @@ export class WebPush {
   detachBySecret(deadline?: number): Promise<void> {
     return this.oneAtATime(async () => {
       const last = this.lastRegistration();
-      // Without a usable apiUrl there's nowhere to send it.
-      if (!last?.deviceSecret || this.api.apiUrl === undefined || !last.userSubject) {
+      // Without a usable apiUrl there's nowhere to send it; without a registration on
+      // record, nothing to detach; and with no secret, it was never sent one.
+      if (
+        !last?.userSubject ||
+        !this.storedDeviceSecret() ||
+        this.api.apiUrl === undefined
+      ) {
         return;
       }
 
@@ -511,7 +513,7 @@ export class WebPush {
     const cleanup: Cleanup = {
       user,
       installationId: this.installationId(),
-      deviceSecret: last?.deviceSecret,
+      deviceSecret: this.storedDeviceSecret(),
       lastSeenAt: last?.lastSeenAt,
       registered: last !== null,
       retryDelayMs: FIRST_CLEANUP_RETRY_MS,
@@ -654,6 +656,31 @@ export class WebPush {
     }, retryAt - Date.now());
     this.retries.add(retry);
     return true;
+  }
+
+  /**
+   * This browser's device secret, made on first use: 32 random bytes, base64url. Kirora
+   * keeps it with each registration, and a detachment can send it instead of a user's
+   * token. Made once, never changed by Kirora's answers.
+   */
+  private deviceSecret(): string {
+    const stored = this.storedDeviceSecret();
+    if (stored) {
+      return stored;
+    }
+    const secret = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
+    this.storage.setItem(this.deviceSecretKey, secret);
+    return secret;
+  }
+
+  /** The device secret, if one was made (and so sent with a registration). */
+  private storedDeviceSecret(): string | undefined {
+    return this.storage.getItem(this.deviceSecretKey) ?? undefined;
+  }
+
+  /** Forgets the device secret, with the device id it goes with. */
+  forgetDeviceSecret(): void {
+    this.storage.removeItem(this.deviceSecretKey);
   }
 
   /**

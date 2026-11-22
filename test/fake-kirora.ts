@@ -288,12 +288,7 @@ export function fakeKirora(
         const lastSeenAt = new Date(Date.UTC(2026, 10, 1, 0, 0, registrations));
         return (
           registrationAnswer?.(request) ??
-          Response.json({
-            data: {
-              lastSeenAt: lastSeenAt.toISOString(),
-              deviceSecret: `secret-${registrations}`,
-            },
-          })
+          Response.json({ data: { lastSeenAt: lastSeenAt.toISOString() } })
         );
       }
       return new Response(null, { status: 204 });

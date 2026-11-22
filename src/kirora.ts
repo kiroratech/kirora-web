@@ -450,6 +450,8 @@ export class Kirora {
   private forgetDeviceIdIfUnused(): void {
     if (!this.push.registered) {
       this.siteStorage.removeItem(this.installationIdKey);
+      // The secret goes with the device id: a new id gets a new one.
+      this.push.forgetDeviceSecret();
     }
   }
 

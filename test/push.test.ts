@@ -365,6 +365,7 @@ it("registers with the browser's language and time zone, and nothing else about 
     subscription: expect.objectContaining({
       endpoint: 'https://push.example.com/subscription',
     }) as unknown,
+    deviceSecret: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as unknown,
     locale: 'en',
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   });
@@ -407,6 +408,7 @@ it('tells Kirora when notifications are blocked, naming the last registration', 
       pushAppId: 'app_web',
       permission: 'denied',
       lastSeenAt: '2026-11-01T00:00:01.000Z',
+      deviceSecret: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as unknown,
       locale: 'en',
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     },
@@ -818,6 +820,12 @@ it("registers the browser where the worker's IndexedDB record never answers (Saf
 
 // The device secret (22 November 2026): detaching with no user token held.
 
+/** The device secret this browser sent with its registrations. */
+function sentSecret(requests: SentRequest[]): string {
+  const put = requests.find((request) => request.method === 'PUT');
+  return (put!.body as { deviceSecret: string }).deviceSecret;
+}
+
 /** The detachments Kirora was sent, as `authorization lastSeenAt-query`. */
 function detaches(requests: SentRequest[]) {
   return requests
@@ -838,7 +846,7 @@ it('detaches with the device secret when logout() comes with nobody signed in', 
   await reloaded.logout();
 
   expect(detaches(server.handled)).toEqual([
-    `Device secret-1 ?lastSeenAt=${encodeURIComponent('2026-11-01T00:00:01.000Z')}`,
+    `Device ${sentSecret(server.handled)} ?lastSeenAt=${encodeURIComponent('2026-11-01T00:00:01.000Z')}`,
   ]);
   expect(savedRegistration()).toBeUndefined();
 });
@@ -858,7 +866,7 @@ it("goes on with the device secret when Kirora refuses the user's token to detac
 
   const sent = detaches(server.handled);
   expect(sent[0]).toMatch(/^Bearer /);
-  expect(sent.at(-1)).toMatch(/^Device secret-1 /);
+  expect(sent.at(-1)).toMatch(new RegExp(`^Device ${sentSecret(server.handled)} `));
 });
 
 it('carries on with a detachment still being retried after a reload, by its secret', async () => {
@@ -875,14 +883,15 @@ it('carries on with a detachment still being retried after a reload, by its secr
       : undefined;
   await kirora.logout();
   kirora.destroy();
-  expect(localStorage.getItem(PENDING_DETACH_KEY)).toContain('secret-1');
+  expect(localStorage.getItem(PENDING_DETACH_KEY)).toContain(sentSecret(server.handled));
 
   // The next page, back online.
+  const secret = sentSecret(server.handled);
   server.answerFirst = undefined;
   server.handled.length = 0;
   const next = pushClient();
   await vi.waitFor(() => expect(detaches(server.handled)).toHaveLength(1));
-  expect(detaches(server.handled)[0]).toMatch(/^Device secret-1 /);
+  expect(detaches(server.handled)[0]).toMatch(new RegExp(`^Device ${secret} `));
   await vi.waitFor(() => expect(localStorage.getItem(PENDING_DETACH_KEY)).toBeNull());
   next.destroy();
 });
@@ -903,4 +912,21 @@ it("never signs another tab's signed-in user out of push from logout() with nobo
   expect(savedRegistration()).toBe('alice');
   aliceTab.destroy();
   otherTab.destroy();
+});
+
+it('sends one device secret it made itself with every registration, the denied form too', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  denyNotifications();
+  await kirora.identify(tokenFor('bob'));
+
+  const secrets = server.handled
+    .filter((request) => request.method === 'PUT')
+    .map((request) => (request.body as { deviceSecret?: string }).deviceSecret);
+  expect(secrets.length).toBeGreaterThanOrEqual(2);
+  expect(secrets[0]).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(new Set(secrets).size).toBe(1);
 });
