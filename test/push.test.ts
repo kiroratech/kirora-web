@@ -27,7 +27,7 @@ function deviceChanges(requests: SentRequest[]) {
 }
 
 /** Who this browser is saved as registered for, if anyone. */
-function savedRegistration(): string | null | undefined {
+function savedRegistration(): string | undefined {
   const saved = localStorage.getItem(REGISTRATION_KEY);
   return saved === null
     ? undefined
@@ -912,6 +912,26 @@ it("never signs another tab's signed-in user out of push from logout() with nobo
   expect(savedRegistration()).toBe('alice');
   aliceTab.destroy();
   otherTab.destroy();
+});
+
+it("detaches by device secret where other tabs can't be asked, as without Web Locks", async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora();
+  const aliceTab = pushClient();
+  await aliceTab.identify(tokenFor('alice'));
+  aliceTab.destroy();
+
+  // A browser without Web Locks (before Firefox 96 and Safari 15.4): a reload where the
+  // app restored its session, and its user signs out before identify().
+  vi.stubGlobal('navigator', { ...navigator, locks: undefined });
+  const reloaded = pushClient();
+  await reloaded.logout();
+
+  expect(detaches(server.handled)).toHaveLength(1);
+  expect(detaches(server.handled)[0]).toMatch(/^Device /);
+  expect(savedRegistration()).toBeUndefined();
+  reloaded.destroy();
 });
 
 it('sends one device secret it made itself with every registration, the denied form too', async () => {

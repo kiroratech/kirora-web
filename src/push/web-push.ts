@@ -492,9 +492,8 @@ export class WebPush {
       }
 
       // The registration is every tab's: while its user is signed in in another one,
-      // or that can't be told, it isn't this logout's to undo.
-      const elsewhere = await signedInElsewhere(this.api.namespace, last.userSubject);
-      if (elsewhere !== false) {
+      // it isn't this logout's to undo.
+      if (await signedInElsewhere(this.api.namespace, last.userSubject)) {
         return;
       }
       await this.startCleanup(last, undefined, deadline);
