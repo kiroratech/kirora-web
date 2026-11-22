@@ -137,7 +137,7 @@ alone a push registration whose user is signed in in another tab.
 ### Releases
 
 To release, bump `version` in `package.json`, turn `Unreleased` in `CHANGELOG.md` into
-that version, and merge to `main`, or push a matching `v*` tag. The
+that version, and merge to `main`. The
 [Release workflow](.github/workflows/release.yml) publishes that version if npm doesn't
 have it yet: it checks the package, packs it once and publishes that tarball, with
 provenance. A prerelease (`0.2.0-beta.1`) goes to the `next` dist-tag. It uses npm trusted

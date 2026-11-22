@@ -1,12 +1,11 @@
 name: Release
 
-# Publishes package.json's version when it isn't on npm yet: after a merge that bumps it,
-# or when a matching v* tag is pushed. Either can come first; the other then does nothing.
-# scripts/release-plan.mjs decides whether to publish, and under which dist-tag.
+# Publishes package.json's version when it isn't on npm yet, after a merge to main that
+# bumps it. scripts/release-plan.mjs decides whether to publish, and under which dist-tag.
+# No tag trigger: a tag can point at a commit that never reached main.
 on:
   push:
     branches: [main]
-    tags: ['v*']
 
 permissions:
   contents: read
