@@ -58,4 +58,4 @@ jobs:
       - if: steps.plan.outputs.publish == 'true'
         run: pnpm check:package
       - if: steps.plan.outputs.publish == 'true'
-        run: npm publish ./release/*.tgz --provenance --access public --tag ${{ steps.plan.outputs.dist-tag }}
+        run: npm publish ./release/*.tgz --tag ${{ steps.plan.outputs.dist-tag }}

@@ -917,20 +917,24 @@ it("never signs another tab's signed-in user out of push from logout() with nobo
 it("detaches by device secret where other tabs can't be asked, as without Web Locks", async () => {
   stubLocalStorage();
   stubWebPush();
+  // A browser without Web Locks, as before Firefox 96 and Safari 15.4.
+  vi.stubGlobal('navigator', { ...navigator, locks: undefined });
   const server = fakeKirora();
   const aliceTab = pushClient();
   await aliceTab.identify(tokenFor('alice'));
-  aliceTab.destroy();
 
-  // A browser without Web Locks (before Firefox 96 and Safari 15.4): a reload where the
-  // app restored its session, and its user signs out before identify().
-  vi.stubGlobal('navigator', { ...navigator, locks: undefined });
+  // Another tab, a reload where the app restored its session, signs out before
+  // identify(): whether Alice's tab is still signed in can't be told, so it detaches.
   const reloaded = pushClient();
   await reloaded.logout();
-
   expect(detaches(server.handled)).toHaveLength(1);
   expect(detaches(server.handled)[0]).toMatch(/^Device /);
   expect(savedRegistration()).toBeUndefined();
+
+  // Alice's tab, if it was still signed in, gets push back at its next identify().
+  await aliceTab.identify(tokenFor('alice'));
+  expect(savedRegistration()).toBe('alice');
+  aliceTab.destroy();
   reloaded.destroy();
 });
 
