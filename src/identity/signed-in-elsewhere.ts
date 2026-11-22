@@ -1,3 +1,4 @@
+import { webLocks } from '../utils/web-locks.js';
 import { sessionOwner } from '../tracking/session.js';
 
 // Which users other tabs of the site have signed in, told by a shared Web Lock each tab
@@ -14,7 +15,7 @@ function lockName(namespace: string, subject: string): string {
  * that lets it go. Does nothing where there are no Web Locks, or they're refused.
  */
 export function holdSignedIn(namespace: string, subject: string): () => void {
-  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+  const locks = webLocks();
   if (!locks) {
     return () => {};
   }
@@ -37,7 +38,7 @@ export async function signedInElsewhere(
   namespace: string,
   subject: string,
 ): Promise<boolean | undefined> {
-  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+  const locks = webLocks();
   if (!locks) {
     return undefined;
   }

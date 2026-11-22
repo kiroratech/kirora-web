@@ -3,14 +3,18 @@ import { ClientApi } from './api/client-api.js';
 import { asKiroraError, isTokenRefusal, KiroraError, UserTokenError } from './errors.js';
 import { EventDelivery } from './events/event-delivery.js';
 import { EventQueue, type QueuedEvent } from './events/event-queue.js';
-import { Identity, isUnnamedSubject } from './identity/identity.js';
+import { Identity, isUnnamedSubject, type SignedInUser } from './identity/identity.js';
 import { NotificationTaps } from './push/notification-taps.js';
 import { WebPush } from './push/web-push.js';
 import { deviceStorage, type KeyValueStorage } from './storage/device-storage.js';
 import { STORAGE_KEYS } from './storage/keys.js';
 import { siteStorage } from './storage/site-storage.js';
 import { TrackingConsent } from './tracking/consent.js';
-import { installationId } from './tracking/installation-id.js';
+import {
+  deviceSecret,
+  installationId,
+  type DeviceSecret,
+} from './tracking/installation-id.js';
 import { watchPageViews } from './tracking/page-context.js';
 import { watchPageLifecycle } from './tracking/page-lifecycle.js';
 import { SESSION_KEEPALIVE_MS } from './tracking/session.js';
@@ -29,6 +33,12 @@ import { settledBy } from './utils/timeout.js';
 const ORPHAN_EVENT_AGE_MS = 24 * 60 * 60_000;
 /** logout() returns within this, whatever the network or the app's token route does. */
 const LOGOUT_DEADLINE_MS = 5_000;
+
+/** The events waiting from before sign-in, as `EventQueue.unboundKeys()` notes them. */
+type WaitingKeys = Awaited<ReturnType<EventQueue['unboundKeys']>>;
+
+/** What's noted when the queue can't be read: nothing to drop. */
+const NONE_WAITING: WaitingKeys = { all: new Set(), borrowed: new Set() };
 
 /**
  * The Kirora browser client. Create one for the whole site. Nothing is sent until
@@ -49,11 +59,11 @@ export class Kirora {
   private readonly taps: NotificationTaps;
   /** Where `device.id` is kept, per workspace. */
   private readonly installationIdKey: string;
+  /** Goes with the device id: made and forgotten with it (see `deviceSecret`). */
+  private readonly deviceSecret: DeviceSecret;
   private destroyed = false;
   /** Undoes what the constructor started: listeners and timers. */
   private readonly stopWatching: (() => void)[] = [];
-  /** Lets go of the lock telling other tabs who is signed in here (see `holdSignedIn`). */
-  private releaseSignIn = () => {};
 
   constructor(given: KiroraOptions) {
     // Plain JavaScript can pass anything, and a bad setting mustn't break the page.
@@ -68,6 +78,8 @@ export class Kirora {
     this.identity = new Identity(
       options.fetchUserToken,
       this.guarded(options.onAuthenticationFailed, 'onAuthenticationFailed'),
+      // Called once a user signs in, when the API (built next) has its namespace.
+      (subject) => holdSignedIn(this.api.namespace, subject),
     );
     this.api = new ClientApi(options, this.identity);
     // Logged rather than thrown, so a bad setting can't break the page. Nothing is sent.
@@ -121,12 +133,14 @@ export class Kirora {
         typeof options.beforeSend === 'function' ? options.beforeSend : undefined,
       log: this.log,
     });
+    this.deviceSecret = deviceSecret(storage, STORAGE_KEYS.deviceSecret(namespace));
     this.push = new WebPush(
       this.api,
       this.identity,
       storage,
       options.push === true ? {} : options.push,
       deviceId,
+      this.deviceSecret,
       this.log,
     );
     this.taps = new NotificationTaps(this.log);
@@ -233,13 +247,14 @@ export class Kirora {
     if (this.destroyed) {
       return;
     }
+    // Every step stops being waited for at the deadline, and carries on in the background
+    // if need be, in order: Kirora may not answer, and another tab, suspended, may hold
+    // the queue's lock.
     const deadline = Date.now() + LOGOUT_DEADLINE_MS;
 
     // The events waiting from before sign-in, noted now: events tracked during this
     // logout aren't among them, and wait for the next user.
-    const waitingBefore = this.queue
-      .unboundKeys()
-      .catch(() => ({ all: new Set<string>(), borrowed: new Set<string>() }));
+    const waitingBefore = this.queue.unboundKeys().catch(() => NONE_WAITING);
 
     // Who this logout is for is decided by what came before it, never by an identify()
     // called after it.
@@ -258,26 +273,26 @@ export class Kirora {
     // The user a sign-in under way when logout() was called set, or failing that whoever
     // was signed in then. A sign-in started since is newer, so it stays.
     const user = newerSignIn ? userBefore : this.identity.user;
-    if (!user) {
-      // Nobody signed in, as after a reload where the app restored its own session: the
-      // device's last registration is still detached, by its device secret.
-      // Of the events waiting, only those that continued a signed-in user's session are
-      // theirs: a plain visitor's stay, for when they sign up.
-      const borrowed = waitingBefore.then(({ borrowed }) => borrowed);
-      // Within the deadline, as all of logout() is: the queue's lock may be held by a
-      // suspended tab. What's left carries on in the background, in order.
-      await Promise.all([
-        settledBy(this.push.detachBySecret(deadline), deadline),
-        settledBy(this.dropEventsFromBeforeSignIn(borrowed), deadline),
-      ]);
-      // Whoever it was, activity here no longer continues their session.
-      this.tracker.signedOut(undefined);
-      return;
+    if (user) {
+      await this.signOutUser(user, waitingBefore, deadline);
+    } else {
+      await this.signOutNobody(waitingBefore, deadline);
     }
+  }
+
+  /**
+   * logout() for `user`: their events are sent and this browser detached from their
+   * pushes, side by side; then they're signed out, and anything of theirs still unsent is
+   * dropped, with the events waiting from before sign-in.
+   */
+  private async signOutUser(
+    user: SignedInUser,
+    waitingBefore: Promise<WaitingKeys>,
+    deadline: number,
+  ): Promise<void> {
     this.identity.signingOut(user);
     try {
-      // Together, so a send that hangs can't leave the detachment no time. It carries on
-      // in the background if it fails.
+      // Together, so a send that hangs can't leave the detachment no time.
       const [sent] = await Promise.all([
         settledBy(this.delivery.flush(), deadline),
         settledBy(this.push.detach(user, deadline), deadline),
@@ -288,10 +303,10 @@ export class Kirora {
           "Gave up waiting for Kirora; the user's unsent events are dropped",
         );
       }
-      // Queue cleanup within the deadline too (as above), carrying on after it if need be.
-      const all = waitingBefore.then(({ all }) => all);
-      await settledBy(this.dropEventsFromBeforeSignIn(all), deadline);
+
+      await settledBy(this.dropEventsFromBeforeSignIn(waitingBefore, 'all'), deadline);
       const signedOut = this.identity.signOut(user);
+
       // Anything left is this user's, so it never goes as the next one; but if they
       // signed in again meanwhile, it's theirs to send.
       if (this.identity.user?.subject !== user.subject) {
@@ -300,10 +315,6 @@ export class Kirora {
       }
       if (signedOut) {
         this.tracker.signedOut(user.subject);
-      }
-      // Nobody is signed in here now: other tabs may sign this browser out of push.
-      if (!this.identity.user) {
-        this.releaseSignIn();
       }
       // Kept past a consent withdrawal only so this browser could be detached.
       if (this.consent.refused) {
@@ -315,6 +326,24 @@ export class Kirora {
       // If cleanup failed before signing them out, they're still here: news again.
       this.identity.signedOut(user);
     }
+  }
+
+  /**
+   * logout() with nobody signed in, as after a reload where the app restored its own
+   * session: the browser's last registration is still detached, by its device secret,
+   * and the waiting events that went on a signed-in user's visit are dropped. A plain
+   * visitor's events stay, for when they sign up.
+   */
+  private async signOutNobody(
+    waitingBefore: Promise<WaitingKeys>,
+    deadline: number,
+  ): Promise<void> {
+    await Promise.all([
+      settledBy(this.push.detachBySecret(deadline), deadline),
+      settledBy(this.dropEventsFromBeforeSignIn(waitingBefore, 'borrowed'), deadline),
+    ]);
+    // Whoever it was, activity here no longer continues their session.
+    this.tracker.stopBorrowingSessions();
   }
 
   /**
@@ -437,7 +466,6 @@ export class Kirora {
     // Forgetting the user stops work already under way for them, such as a sign-in
     // waiting for its token or a push registration, at its next step.
     this.identity.end();
-    this.releaseSignIn();
     this.delivery.destroy();
     this.push.destroy();
     for (const stop of this.stopWatching.splice(0)) {
@@ -456,19 +484,24 @@ export class Kirora {
     if (!this.push.registered) {
       this.siteStorage.removeItem(this.installationIdKey);
       // The secret goes with the device id: a new id gets a new one.
-      this.push.forgetDeviceSecret();
+      this.deviceSecret.forget();
     }
   }
 
   /**
-   * Drops those of `waiting` still waiting from before sign-in, as a user signs out:
+   * Drops those of `waiting` (`all`, or those `borrowed` from a signed-in user's visit)
+   * still waiting from before sign-in, as a user signs out:
    * whoever signed out tracked them, so the next user to sign in must not adopt them. Run
    * once a sign-in under way has settled, as it adopts those it can, for the user signing
    * out. Never rejects.
    */
-  private async dropEventsFromBeforeSignIn(waiting: Promise<Set<string>>): Promise<void> {
+  private async dropEventsFromBeforeSignIn(
+    waiting: Promise<WaitingKeys>,
+    which: keyof WaitingKeys,
+  ): Promise<void> {
     try {
-      await this.queue.removeUnbound(await waiting);
+      const keys = (await waiting)[which];
+      await this.queue.removeUnbound(keys);
     } catch (error) {
       this.log('error', "Couldn't clear events", error);
     }
@@ -494,13 +527,6 @@ export class Kirora {
   /** Once signed in: adopt and send what waits, and register this browser for push. */
   private async onSignedIn(): Promise<void> {
     const { user } = this.identity;
-
-    // Held while they're signed in here, so another tab's logout() with nobody signed in
-    // doesn't sign this browser out of their pushes.
-    this.releaseSignIn();
-    if (user) {
-      this.releaseSignIn = holdSignedIn(this.api.namespace, user.subject);
-    }
 
     // What was tracked before sign-in is this user's from now on, whoever signs in next,
     // unless Kirora refuses their token before accepting any request.

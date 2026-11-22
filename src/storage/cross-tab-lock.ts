@@ -26,13 +26,14 @@ function openDatabase(): Promise<IDBDatabase> {
   if (stalled) {
     return Promise.reject(new LockUnavailable('IndexedDB never opened'));
   }
-  // A connection belongs to the IndexedDB that opened it, which a page never replaces.
+  // A connection belongs to the IndexedDB that opened it. A page never replaces it, but
+  // tests swap one in for each case, and a cached connection to the last would hang.
   if (openedWith !== indexedDB) {
     connection = undefined;
     openedWith = indexedDB;
   }
   connection ??= new Promise<IDBDatabase>((resolve, reject) => {
-    // Throws where IndexedDB is missing or refused, before any timer is set.
+    // Throws where IndexedDB is refused, before any timer is set.
     const open = indexedDB.open(DATABASE, 1);
     const timeout = setTimeout(() => {
       stalled = true;

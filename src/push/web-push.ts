@@ -1,3 +1,4 @@
+import type { DeviceSecret } from '../tracking/installation-id.js';
 import { signedInElsewhere } from '../identity/signed-in-elsewhere.js';
 import type { NotificationTaps } from './notification-taps.js';
 import { SDK_NAME, type ClientApi } from '../api/client-api.js';
@@ -12,7 +13,7 @@ import {
 import { readJson, type KeyValueStorage } from '../storage/device-storage.js';
 import { STORAGE_KEYS } from '../storage/keys.js';
 import { localeAndTimezone } from '../tracking/page-context.js';
-import { base64UrlBytes, base64UrlEncode } from '../utils/base64url.js';
+import { base64UrlBytes } from '../utils/base64url.js';
 import { withTimeout } from '../utils/timeout.js';
 import {
   forgetSubscription,
@@ -108,8 +109,6 @@ export class WebPush {
   private readonly registrationKey: string;
   /** Where a detachment still being retried is kept, for a reload to carry on with. */
   private readonly pendingDetachKey: string;
-  /** Where this browser's device secret is kept (see `deviceSecret()`). */
-  private readonly deviceSecretKey: string;
   /** Set while `setPushEnabled(false)` holds. */
   private readonly disabledKey: string;
   private readonly serviceWorkerUrl: string;
@@ -127,12 +126,12 @@ export class WebPush {
     private readonly storage: KeyValueStorage,
     private readonly options: KiroraPushOptions | undefined,
     private readonly installationId: () => string,
+    private readonly deviceSecret: Pick<DeviceSecret, 'make' | 'read'>,
     private readonly log: Log,
   ) {
     this.registrationKey = STORAGE_KEYS.pushRegistration(api.namespace);
     this.disabledKey = STORAGE_KEYS.pushDisabled(api.namespace);
     this.pendingDetachKey = STORAGE_KEYS.pushPendingDetach(api.namespace);
-    this.deviceSecretKey = STORAGE_KEYS.deviceSecret(api.namespace);
     this.serviceWorkerUrl = options?.serviceWorkerUrl ?? DEFAULT_SERVICE_WORKER_URL;
   }
 
@@ -348,7 +347,7 @@ export class WebPush {
       as: user,
       // The secret goes with every registration: it can detach the device later with
       // nobody signed in.
-      body: { ...body, deviceSecret: this.deviceSecret(), ...localeAndTimezone() },
+      body: { ...body, deviceSecret: this.deviceSecret.make(), ...localeAndTimezone() },
     });
   }
 
@@ -472,20 +471,23 @@ export class WebPush {
   }
 
   /**
-   * Detaches this browser with nobody signed in (a reload where the app restored its own
-   * session), by the device secret of its last registration, if it has one. As
-   * `detach()` otherwise.
+   * Detaches this browser's last registration with nobody signed in (a reload where the
+   * app restored its own session), by this browser's device secret, unless its user is
+   * signed in in another tab. As `detach()` otherwise.
    */
   detachBySecret(deadline?: number): Promise<void> {
     return this.oneAtATime(async () => {
       const last = this.lastRegistration();
-      // Without a usable apiUrl there's nowhere to send it; without a registration on
-      // record, nothing to detach; and with no secret, it was never sent one.
-      if (
-        !last?.userSubject ||
-        !this.storedDeviceSecret() ||
-        this.api.apiUrl === undefined
-      ) {
+      // No registration on record: nothing to detach.
+      if (!last?.userSubject) {
+        return;
+      }
+      // No secret: none was ever sent with a registration.
+      if (!this.deviceSecret.read()) {
+        return;
+      }
+      // No usable apiUrl: nowhere to send it.
+      if (this.api.apiUrl === undefined) {
         return;
       }
 
@@ -513,7 +515,7 @@ export class WebPush {
     const cleanup: Cleanup = {
       user,
       installationId: this.installationId(),
-      deviceSecret: this.storedDeviceSecret(),
+      deviceSecret: this.deviceSecret.read(),
       lastSeenAt: last?.lastSeenAt,
       registered: last !== null,
       retryDelayMs: FIRST_CLEANUP_RETRY_MS,
@@ -656,31 +658,6 @@ export class WebPush {
     }, retryAt - Date.now());
     this.retries.add(retry);
     return true;
-  }
-
-  /**
-   * This browser's device secret, made on first use: 32 random bytes, base64url. Kirora
-   * keeps it with each registration, and a detachment can send it instead of a user's
-   * token. Made once, never changed by Kirora's answers.
-   */
-  private deviceSecret(): string {
-    const stored = this.storedDeviceSecret();
-    if (stored) {
-      return stored;
-    }
-    const secret = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
-    this.storage.setItem(this.deviceSecretKey, secret);
-    return secret;
-  }
-
-  /** The device secret, if one was made (and so sent with a registration). */
-  private storedDeviceSecret(): string | undefined {
-    return this.storage.getItem(this.deviceSecretKey) ?? undefined;
-  }
-
-  /** Forgets the device secret, with the device id it goes with. */
-  forgetDeviceSecret(): void {
-    this.storage.removeItem(this.deviceSecretKey);
   }
 
   /**

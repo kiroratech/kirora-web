@@ -169,8 +169,9 @@ export function stubWebPush(subscribing: Promise<void> = Promise.resolve()) {
 
 /**
  * Web Locks of this test's own, as Node's are shared by every test in a file: exclusive
- * requests for a name run one at a time, shared ones side by side, and `query()` says
- * which are held.
+ * requests for a name run one at a time, and shared ones side by side, and `query()` says
+ * which are held. Unlike real Web Locks, a shared request never waits for an exclusive
+ * one, which no test needs.
  */
 export function fakeLocks() {
   const held = new Map<string, number>();
@@ -191,16 +192,14 @@ export function fakeLocks() {
   };
 
   return {
-    request<Result>(
-      name: string,
-      optionsOrOperation: { mode?: 'shared' | 'exclusive' } | (() => Promise<Result>),
-      maybeOperation?: () => Promise<Result>,
-    ): Promise<Result> {
-      const operation =
-        typeof optionsOrOperation === 'function' ? optionsOrOperation : maybeOperation!;
-      const shared =
-        typeof optionsOrOperation === 'object' && optionsOrOperation.mode === 'shared';
-      if (shared) {
+    /** As `navigator.locks.request(name, operation)` or `(name, options, operation)`. */
+    request<Result>(name: string, ...rest: unknown[]): Promise<Result> {
+      const operation = rest.at(-1) as () => Promise<Result>;
+      const options = (rest.length > 1 ? rest[0] : {}) as {
+        mode?: 'shared' | 'exclusive';
+      };
+
+      if (options.mode === 'shared') {
         return hold(name, operation);
       }
       const previous = tails.get(name) ?? Promise.resolve();

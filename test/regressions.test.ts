@@ -6,6 +6,7 @@ import { Kirora, type KiroraOptions } from '../src/index.js';
 import {
   accepted,
   fakeKirora,
+  fakeLocks,
   kiroraRefusing,
   memoryStorage,
   recordSends,
@@ -748,17 +749,19 @@ it('leaves a pending detachment alone where apiUrl is unusable', async () => {
   kirora.destroy();
 });
 
-/** Web Locks as in a tab whose queue lock another, suspended tab holds: once `stuck`. */
+/**
+ * The test's Web Locks (see `fakeLocks`), as in a tab whose queue lock another, suspended
+ * tab holds: once `stuck`, no request is ever granted.
+ */
 function stuckLocks() {
   const state = { stuck: false };
+  const locks = fakeLocks();
   vi.stubGlobal('navigator', {
     language: 'en',
     locks: {
-      request: (_name: string, ...rest: unknown[]) => {
-        const operation = rest.at(-1) as () => Promise<unknown>;
-        return state.stuck ? new Promise(() => undefined) : operation();
-      },
-      query: () => Promise.resolve({ held: [], pending: [] }),
+      ...locks,
+      request: (name: string, ...rest: unknown[]) =>
+        state.stuck ? new Promise(() => undefined) : locks.request(name, ...rest),
     },
   });
   return state;

@@ -85,9 +85,17 @@ export class Identity {
    */
   private identifying: SignInUnderWay | null = null;
 
+  /** Who other tabs are told is signed in here, and how to stop telling them. */
+  private presence: { subject: string; release: () => void } | undefined;
+
   constructor(
     private readonly fetchUserToken: KiroraOptions['fetchUserToken'],
     private readonly onFailed?: (reason: AuthenticationFailureReason) => void,
+    /**
+     * Tells other tabs `subject` is signed in here, until the returned function is
+     * called (see `holdSignedIn`).
+     */
+    private readonly announce?: (subject: string) => () => void,
   ) {}
 
   /** The signed-in user, or null. */
@@ -330,6 +338,23 @@ export class Identity {
     // Sets the first refresh, a minute before the token expires.
     if (this.signedIn) {
       this.setTimer(0);
+    }
+    this.announceSignedIn(user ? user.subject : null);
+  }
+
+  /**
+   * Tells other tabs who is signed in here, for as long as they are: another tab's
+   * logout() with nobody signed in then leaves their push registration alone. The same
+   * user signing in again keeps what's there.
+   */
+  private announceSignedIn(subject: string | null): void {
+    if (this.presence?.subject === subject) {
+      return;
+    }
+    this.presence?.release();
+    this.presence = undefined;
+    if (subject !== null && this.announce) {
+      this.presence = { subject, release: this.announce(subject) };
     }
   }
 

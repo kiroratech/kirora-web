@@ -84,17 +84,18 @@ export class Tracker {
     this.safely(() => sessions.endSession(this.sessionStore));
   }
 
+  /** `subject` signed out in this tab: their session ends, and borrowing stops. */
+  signedOut(subject: string): void {
+    this.stopBorrowingSessions();
+    this.safely(() => sessions.endSession(this.sessionStore, subject));
+  }
+
   /**
-   * Someone signed out in this tab: `subject`'s session ends (undefined when nobody was
-   * signed in, so whose it was isn't known), and activity here is no one's until the next
-   * sign-in, never continuing another user's live session.
+   * Activity here is no one's until the next sign-in, never continuing another user's
+   * live session, as it does on a page load: after a sign-out in this tab.
    */
-  signedOut(subject: string | undefined): void {
+  stopBorrowingSessions(): void {
     this.signedOutHere = true;
-    // With nobody signed in, whose session it was isn't known: borrowing just stops.
-    if (subject !== undefined) {
-      this.safely(() => sessions.endSession(this.sessionStore, subject));
-    }
   }
 
   /** Forgets queued events and the session, as when consent is withdrawn. */

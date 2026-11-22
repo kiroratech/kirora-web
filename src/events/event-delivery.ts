@@ -227,7 +227,8 @@ export class EventDelivery {
     while (mayStillSend()) {
       const hidden = isPageHidden();
       // Read at once while hidden: the page may be going away.
-      // Reads extra, to skip the events another send already has on their way.
+      // Reads extra, to skip the events another send already has on their way; the batch
+      // still takes no more than `maxEvents`.
       const wanted = maxEvents + this.inFlight.size;
       const oldest = await this.queue.oldest(wanted, user.subject, hidden);
       // Marked as on their way in the same step, before another send can read them.
@@ -270,8 +271,8 @@ export class EventDelivery {
   }
 
   /**
-   * The batch to send from `oldest`, and its size. Events already on their way in
-   * another send are left to it.
+   * The batch to send from `oldest`, and its size: at most `maxEvents`, skipping those
+   * already on their way in another send, which are left to it.
    */
   private nextBatch(
     oldest: QueuedEvent[],
@@ -281,7 +282,6 @@ export class EventDelivery {
     const notInFlight = oldest.filter(
       (event) => !this.inFlight.has(event.idempotencyKey),
     );
-    // Read extra to skip those in flight, but never more than a batch takes.
     return fitBatch(notInFlight.slice(0, maxEvents), hidden, this.keepaliveBytes);
   }
 

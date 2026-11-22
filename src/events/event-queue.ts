@@ -1,3 +1,4 @@
+import { webLocks } from '../utils/web-locks.js';
 import { isPageHidden } from '../utils/page-hidden.js';
 import type { KeyValueStorage } from '../storage/device-storage.js';
 import {
@@ -264,9 +265,9 @@ export class EventQueue {
   }
 
   /**
-   * The idempotency keys of the events waiting from before sign-in, as of now: `all`
-   * of them, and those `borrowed` from a signed-in user's session, as a reload before
-   * `identify()` tracks them.
+   * The idempotency keys of the events waiting from before sign-in, as of now: `all` of
+   * them, and those `borrowed`: tracked while continuing a signed-in user's session
+   * (`sessionOwner` set), as after a reload before `identify()`.
    */
   unboundKeys(): Promise<{ all: Set<string>; borrowed: Set<string> }> {
     return this.inTurn(() => {
@@ -406,7 +407,7 @@ export class EventQueue {
    * Operations run in the order they're asked for.
    */
   private exclusively<Result>(operation: () => Result): Promise<Result> {
-    const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+    const locks = webLocks();
 
     // Always a tick later, even where a free lock is granted at once, so adds made in the
     // same tick have joined their batch by the time it's written.
