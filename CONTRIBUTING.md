@@ -34,7 +34,7 @@ Before submitting:
 - Add or update tests for your change.
 - Run `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` and
   `pnpm size`.
-- Update the README if you changed public behaviour.
+- Update the README and the guides in `docs/` if you changed public behaviour.
 - Once the SDK is on npm, run `pnpm changeset` to describe any change users will
   notice. It goes in the changelog and decides the next version.
 
@@ -111,6 +111,29 @@ exported there is internal.
 The behaviour every Kirora client SDK shares (options, methods, delivery, sessions,
 consent, the `/client/v1` wire contract) is defined in Kirora's client SDK interface.
 Change it there first.
+
+### How tabs share the queue
+
+Every tab of a site shares one queue in `localStorage`, and changes it one at a time under
+a Web Lock. Browsers older than Firefox 96 and Safari 15.4 have no Web Locks, so there an
+IndexedDB transaction in the `kirora-locks` database is the lock instead
+(`src/storage/cross-tab-lock.ts`).
+
+A lock alone isn't enough: a tab's copy of `localStorage` can lag behind another tab's
+write for a moment (Chromium delivers it after the lock is released), and changing a
+stale copy would lose that tab's events. So each write is counted, in IndexedDB, which
+every tab reads alike, and beside the queue; a tab holding the lock waits until its copy
+shows the latest count (`src/events/event-queue.ts`). With two busy tabs this took loss
+from 25–33% to none in 600 events.
+
+Where IndexedDB is refused (some private windows), nothing tells a tab when another tab's
+write has arrived. While another tab is writing, the SDK waits a moment before reading,
+which in Chromium cut the loss from about 20% to about 0.3%; two tabs signing in at the
+same instant there can also both adopt the same event from before sign-in.
+
+The same kind of lock, held shared by each tab for its signed-in user
+(`src/identity/signed-in-elsewhere.ts`), lets `logout()` with nobody signed in leave
+alone a push registration whose user is signed in in another tab.
 
 ### Releases
 

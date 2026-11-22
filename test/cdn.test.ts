@@ -12,7 +12,7 @@ type Call = [
   held: { at: number; href: string; title: string },
 ];
 
-/** What the README's loader snippet leaves on `window.kirora`, with these calls queued. */
+/** What the loader snippet (docs/script-tag.md) leaves on `window.kirora`, with these calls queued. */
 function loaderSnippet(options: KiroraOptions, calls: [string, ...unknown[]][]) {
   const held = () => ({ at: Date.now(), href: 'https://example.com/', title: 'Home' });
   const queue =
