@@ -281,3 +281,14 @@ describe('page views', () => {
     expect(viewed).toEqual(['/ Home', '/untitled ']);
   });
 });
+
+it('patches history once, however many clients come and go (hot reload)', () => {
+  stubPage({ href: 'https://example.com/' });
+  watchViews().stop();
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- compared, not called
+  const patched = history.pushState;
+  watchViews().stop();
+  watchViews().stop();
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- compared, not called
+  expect(history.pushState).toBe(patched);
+});

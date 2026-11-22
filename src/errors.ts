@@ -1,6 +1,7 @@
 /** Every error the SDK throws, so an app can catch them all with one `instanceof`. */
 export class KiroraError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  // Not `ErrorOptions`, which apps compiled without ES2022's lib can't name.
+  constructor(message: string, options?: { cause?: unknown }) {
     super(`Kirora: ${message}`, options);
     this.name = 'KiroraError';
     // Chrome 93, Firefox 91 and Safari 15 are the first to take `cause` from options.

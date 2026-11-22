@@ -7,9 +7,17 @@ import { STORAGE_KEYS } from '../storage/keys.js';
 import { localeAndTimezone } from '../tracking/page-context.js';
 import { base64UrlBytes } from '../utils/base64url.js';
 import { withTimeout } from '../utils/timeout.js';
-import { forgetSubscription, saveSubscription } from './subscription-store.js';
-import type { PushOptions, PushPermission, PushStatus } from '../types.js';
+import {
+  forgetSubscription,
+  readSubscription,
+  saveSubscription,
+  type SavedSubscription,
+} from './subscription-store.js';
+import type { KiroraPushOptions, PushPermission, PushStatus } from '../types.js';
 import type { Log } from '../utils/log.js';
+
+/** How long the worker's IndexedDB record is waited for, before registering without it. */
+const WORKER_RECORD_TIMEOUT_MS = 2000;
 
 /** Response of `GET /push-app`. */
 type PushApp = { pushAppId: string; name: string; vapidPublicKey: string };
@@ -91,7 +99,7 @@ export class WebPush {
     private readonly api: ClientApi,
     private readonly identity: Identity,
     private readonly storage: KeyValueStorage,
-    private readonly options: PushOptions | undefined,
+    private readonly options: KiroraPushOptions | undefined,
     private readonly installationId: () => string,
     private readonly log: Log,
   ) {
@@ -189,7 +197,12 @@ export class WebPush {
     }
     this.storage.setItem(this.disabledKey, '1');
     // As for a detachment: only a subscription Kirora has on record is surely its own.
-    const ours = this.registered;
+    // Read in turn, after any registration still under way.
+    let ours = false;
+    await this.oneAtATime(() => {
+      ours = this.registered;
+      return Promise.resolve();
+    });
     const { user } = this.identity;
     if (user) await this.detach(user);
     if (ours) await this.oneAtATime(() => this.cancelSubscription());
@@ -217,7 +230,30 @@ export class WebPush {
       worker,
       pushApp.vapidPublicKey,
       this.lastRegistration(),
+      // The worker's record outlives a logout's: proof a subscription is ours after it.
+      // Bounded, as IndexedDB may never answer (Safari 14): registering doesn't need it.
+      await withTimeout(readSubscription(worker.scope), WORKER_RECORD_TIMEOUT_MS).catch(
+        () => undefined,
+      ),
     );
+    if (!current()) return;
+    // For the worker, to tell Kirora when the browser replaces this subscription. Saved
+    // before Kirora answers, so it's known as ours even if that fails (`pushSubscription`).
+    await withTimeout(
+      saveSubscription(worker.scope, {
+        url: `${this.api.apiUrl!}/client/v1/push-subscription-change`,
+        apiUrl: this.api.apiUrl!,
+        clientKey: this.api.clientKey,
+        sdk: SDK_NAME,
+        pushAppId: pushApp.pushAppId,
+        vapidPublicKey: pushApp.vapidPublicKey,
+        subscription,
+      }),
+      WORKER_RECORD_TIMEOUT_MS,
+    ).catch((error: unknown) => {
+      this.log('debug', "Couldn't keep the subscription for the service worker", error);
+    });
+    // Again: the user may have changed while that was saved.
     if (!current()) return;
     const answer = await this.api.request<DeviceAnswer>(
       'PUT',
@@ -246,18 +282,6 @@ export class WebPush {
       lastSeenAt: answer?.lastSeenAt,
     };
     this.storage.setItem(this.registrationKey, JSON.stringify(registration));
-    // For the worker, to tell Kirora when the browser replaces this subscription.
-    await saveSubscription(worker.scope, {
-      url: `${this.api.apiUrl!}/client/v1/push-subscription-change`,
-      apiUrl: this.api.apiUrl!,
-      clientKey: this.api.clientKey,
-      sdk: SDK_NAME,
-      pushAppId: pushApp.pushAppId,
-      vapidPublicKey: pushApp.vapidPublicKey,
-      subscription,
-    }).catch((error: unknown) => {
-      this.log('debug', "Couldn't keep the subscription for the service worker", error);
-    });
     this.log('debug', `Registered this browser with ${pushApp.name}`);
   }
 
@@ -320,25 +344,29 @@ export class WebPush {
    * made it, nor one that moved to someone else.
    */
   detach(user: SignedInUser, deadline?: number): Promise<void> {
-    const last = this.lastRegistration();
-    // Registered for someone else (another tab's sign-in took it over): not this user's
-    // to detach, nor their subscription to cancel.
-    if (last && last.userSubject !== user.subject) return Promise.resolve();
-    // With no record, it may still have been registered (its answer lost, or storage
-    // full): detached unconditionally, wherever it could have been. Kirora answers 404 if
-    // there's nothing of this user's.
-    const couldBeRegistered =
-      this.options && webPushSupported() && Notification.permission === 'granted';
-    if (!last && !couldBeRegistered) return Promise.resolve();
-    const cleanup: Cleanup = {
-      user,
-      installationId: this.installationId(),
-      lastSeenAt: last?.lastSeenAt,
-      registered: last !== null,
-      retryDelayMs: FIRST_CLEANUP_RETRY_MS,
-      giveUpAt: Date.now() + CLEANUP_GIVE_UP_MS,
-    };
-    return this.oneAtATime(() => this.attemptCleanup(cleanup, true, deadline));
+    // In turn, so the record read is the one a registration still under way leaves: an
+    // older `lastSeenAt` would have Kirora keep that registration (409).
+    return this.oneAtATime(() => {
+      const last = this.lastRegistration();
+      // Registered for someone else (another tab's sign-in took it over): not this
+      // user's to detach, nor their subscription to cancel.
+      if (last && last.userSubject !== user.subject) return Promise.resolve();
+      // With no record, it may still have been registered (its answer lost, or storage
+      // full): detached unconditionally, wherever it could have been. Kirora answers 404
+      // if there's nothing of this user's.
+      const couldBeRegistered =
+        this.options && webPushSupported() && Notification.permission === 'granted';
+      if (!last && !couldBeRegistered) return Promise.resolve();
+      const cleanup: Cleanup = {
+        user,
+        installationId: this.installationId(),
+        lastSeenAt: last?.lastSeenAt,
+        registered: last !== null,
+        retryDelayMs: FIRST_CLEANUP_RETRY_MS,
+        giveUpAt: Date.now() + CLEANUP_GIVE_UP_MS,
+      };
+      return this.attemptCleanup(cleanup, true, deadline);
+    });
   }
 
   /** Stops detachments still being retried, and anything else on a timer. */
@@ -437,7 +465,7 @@ export class WebPush {
   }
 
   /** The workspace is in `registrationKey` already. */
-  private config(options: PushOptions): string {
+  private config(options: KiroraPushOptions): string {
     return JSON.stringify([
       options.pushAppId ?? null,
       this.serviceWorkerUrl,
@@ -517,12 +545,19 @@ async function pushSubscription(
   registration: ServiceWorkerRegistration,
   vapidPublicKey: string,
   last: PushRegistration | null,
+  saved: SavedSubscription | undefined,
 ): Promise<PushSubscriptionJSON> {
   const applicationServerKey = base64UrlBytes(vapidPublicKey);
   const existing = await registration.pushManager.getSubscription();
   if (existing) {
-    // The record of what we registered last, if this subscription is the one we made.
-    const ourRecord = existing.endpoint === last?.endpoint ? last : null;
+    // The record of what we registered last, if this subscription is the one we made:
+    // the page's, or failing that (cleared by a logout) the worker's.
+    const ourRecord =
+      existing.endpoint === last?.endpoint
+        ? last
+        : existing.endpoint === saved?.subscription.endpoint
+          ? { vapidPublicKey: saved.vapidPublicKey }
+          : null;
     if (madeWithKey(existing, vapidPublicKey, applicationServerKey, ourRecord)) {
       return existing.toJSON();
     }
@@ -549,18 +584,21 @@ function madeWithKey(
   existing: PushSubscription,
   vapidPublicKey: string,
   applicationServerKey: Uint8Array,
-  ourRecord: PushRegistration | null,
+  ourRecord: Pick<PushRegistration, 'vapidPublicKey'> | null,
 ): boolean {
   // Missing in Firefox before 75, which can't say which key made a subscription.
   const options = existing.options as PushSubscriptionOptions | undefined;
   if (options) return sameKey(options.applicationServerKey, applicationServerKey);
-  // Then our own record says which key we used, if we made it (records saved before we
-  // started storing the key don't say).
-  if (ourRecord?.vapidPublicKey !== undefined) {
-    return ourRecord.vapidPublicKey === vapidPublicKey;
+  // Then our own record says which key we used, if we made it; one saved before we
+  // stored keys doesn't say, and is taken as made with ours.
+  if (ourRecord) {
+    return (
+      ourRecord.vapidPublicKey === undefined ||
+      ourRecord.vapidPublicKey === vapidPublicKey
+    );
   }
-  // Otherwise there's no telling, so it's taken as made with ours.
-  return true;
+  // No record claims it: another service's, never taken over.
+  return false;
 }
 
 /**
@@ -573,12 +611,19 @@ async function readyRegistration(
   serviceWorkerUrl: string,
 ): Promise<ServiceWorkerRegistration> {
   const scriptUrl = new URL(serviceWorkerUrl, location.href).href;
-  const existing = await navigator.serviceWorker.getRegistration(
-    new URL('./', scriptUrl).href,
-  );
+  const scope = new URL('./', scriptUrl).href;
+  const existing = await navigator.serviceWorker.getRegistration(scope);
   const existingScript = (existing?.active ?? existing?.waiting ?? existing?.installing)
     ?.scriptURL;
-  if (existingScript && existingScript !== scriptUrl) {
+  // The site registered this worker itself, perhaps at a wider scope: used as it is, as
+  // registering again would add a second copy of it at the default scope.
+  if (existing && existingScript === scriptUrl) {
+    await withTimeout(activated(existing), WORKER_ACTIVATION_TIMEOUT_MS);
+    return existing;
+  }
+  // Only a different worker at the very scope we'd register would be replaced. One at
+  // a wider scope keeps its pages, beside ours.
+  if (existingScript && existing!.scope === scope) {
     const path = new URL(existingScript).pathname;
     throw new KiroraError(
       `${path} is already this site's service worker. Add ` +

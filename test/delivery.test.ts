@@ -107,17 +107,21 @@ it.each([400, 422])(
   },
 );
 
-it.each([
-  ['no errors', { code: 'VALIDATION_ERROR' }],
-  [
-    'a header',
-    { code: 'VALIDATION_ERROR', errors: [{ in: 'headers', field: 'kirora-sdk' }] },
-  ],
-  ['a query', { code: 'VALIDATION_ERROR', errors: [{ in: 'query', field: 'x' }] }],
-])(
-  'keeps the events for a 400 naming %s, a problem with the request',
-  async (_, error) => {
-    let answer = 400;
+it.each(
+  [400, 422].flatMap((status) =>
+    [
+      ['no errors', { code: 'VALIDATION_ERROR' }],
+      [
+        'a header',
+        { code: 'VALIDATION_ERROR', errors: [{ in: 'headers', field: 'kirora-sdk' }] },
+      ],
+      ['a query', { code: 'VALIDATION_ERROR', errors: [{ in: 'query', field: 'x' }] }],
+    ].map(([what, error]) => [status, what, error] as const),
+  ),
+)(
+  'keeps the events for a %i naming %s, a problem with the request',
+  async (status, _, error) => {
+    let answer = status;
     const { kirora, batches } = kiroraAnswering((batch) =>
       answer === 200 ? accepted(batch) : Response.json({ error }, { status: answer }),
     );
@@ -395,12 +399,15 @@ it("lets go of a refused answer's body before trying again with a fresh token", 
   const kirora = new Kirora({
     clientKey: 'kirora_pk_test',
     trackSessions: false,
-    fetchUserToken: () => Promise.resolve('fresh-token'),
+    fetchUserToken: () => Promise.resolve(tokenFor('ada', '-fresh')),
   });
   kirora.track('Invoice Paid');
-  await kirora.identify('expired-token');
+  await kirora.identify(tokenFor('ada', '-expired'));
   await kirora.flush();
-  expect(tokens).toEqual(['Bearer expired-token', 'Bearer fresh-token']);
+  expect(tokens).toEqual([
+    `Bearer ${tokenFor('ada', '-expired')}`,
+    `Bearer ${tokenFor('ada', '-fresh')}`,
+  ]);
   expect(cancelled).toBe(true);
 });
 

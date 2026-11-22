@@ -214,21 +214,39 @@ export function watchPageViews(onPageView: () => void): () => void {
       });
     });
   };
-  // The patches stay once stopped, doing nothing more: something else may have patched
-  // `history` over ours since, so putting the originals back could undo theirs.
-  for (const method of ['pushState', 'replaceState'] as const) {
-    const original = history[method].bind(history);
-    history[method] = (...args: Parameters<History['pushState']>) => {
-      original(...args);
-      onNavigation();
-    };
-  }
+  patchHistory();
+  navigationWatchers.add(onNavigation);
   addEventListener('popstate', onNavigation);
   onPageView();
   // In a replay, catches a page the app moved to after the held one, before we loaded.
   onNavigation();
   return () => {
     watching = false;
+    navigationWatchers.delete(onNavigation);
     removeEventListener('popstate', onNavigation);
   };
+}
+
+/** What each client watching page views does on a `pushState` or `replaceState`. */
+const navigationWatchers = new Set<() => void>();
+/** The `history` patched, once. */
+let patched: History | undefined;
+
+/**
+ * Patches `history` once per page, for every client: a client replaced on hot reload
+ * leaves no patch behind. The patch stays, doing nothing with no client watching:
+ * something else may have patched `history` over ours since, so putting the originals
+ * back could undo theirs. Missing from some DOM shims (linkedom, test setups): no SPA
+ * page views there.
+ */
+function patchHistory(): void {
+  if (typeof history === 'undefined' || patched === history) return;
+  patched = history;
+  for (const method of ['pushState', 'replaceState'] as const) {
+    const original = history[method].bind(history);
+    history[method] = (...args: Parameters<History['pushState']>) => {
+      original(...args);
+      for (const watcher of navigationWatchers) watcher();
+    };
+  }
 }

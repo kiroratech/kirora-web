@@ -84,6 +84,9 @@ it.each([
   'https://api.example.com/t/x/abc',
   'https://api.example.com/t/p/../../steal',
   'https://api.example.com/t/p/%2e%2e/steal',
+  // URL parsing drops tabs and newlines, so these are `..` too.
+  'https://api.example.com/t/p/.\t./.\t./client/v1/devices/x',
+  'https://api.example.com/t/p/.\n./steal',
   'not a url',
 ])(
   'reports nowhere but under the apiUrl the page registered with: %s',
@@ -163,6 +166,21 @@ async function show(push: Record<string, unknown>) {
   await Promise.allSettled(waits);
   return reported.slice(before);
 }
+
+it('shows a push whose buttons are malformed, leaving those out', async () => {
+  const before = shown.length;
+  await show({
+    kirora: 'true',
+    title: 'Your invoice is ready',
+    buttons: [
+      null,
+      { url: 'https://example.com/no-title' },
+      { title: 'Pay', url: 'https://example.com/pay' },
+    ],
+  });
+  const options = shown[before]?.options as { actions?: unknown[] } | undefined;
+  expect(options?.actions).toEqual([{ action: '0', title: 'Pay' }]);
+});
 
 it('reports a push as delivered once it is on screen', async () => {
   const shownBefore = shown.length;

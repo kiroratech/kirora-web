@@ -161,12 +161,18 @@ it('does nothing once permission is gone and it cannot subscribe again', async (
 });
 
 it.each([404, 409])(
-  'forgets the subscription when Kirora answers %i, without retrying',
+  'forgets the subscription when Kirora answers %i, without retrying, keeping the API address',
   async (status) => {
     answers = [() => Promise.resolve(new Response(null, { status }))];
     await change({ newSubscription: subscription('https://push.example.com/new') });
     expect(sent).toHaveLength(1);
-    expect(await readSubscription(SCOPE)).toBeUndefined();
+    const kept = await readSubscription(SCOPE);
+    expect(kept?.subscription).toEqual({});
+    // Tracking URLs are still checked against the page's own Kirora.
+    expect(kept?.apiUrl).toBeDefined();
+    // A later change has nothing to move.
+    await change({ newSubscription: subscription('https://push.example.com/newer') });
+    expect(sent).toHaveLength(1);
   },
 );
 

@@ -6,7 +6,6 @@ import { DEFAULT_API_URL } from '../../api/default-api-url.js';
 import { base64UrlBytes } from '../../utils/base64url.js';
 import { retryAfterMs } from '../../utils/retry-after.js';
 import {
-  forgetSubscription,
   readSubscription,
   saveSubscription,
   type SavedSubscription,
@@ -71,7 +70,10 @@ function kiroraPush(event: PushEvent): KiroraPush | undefined {
 self.addEventListener('push', (event) => {
   const push = kiroraPush(event);
   if (!push) return;
-  const buttons = Array.isArray(push.buttons) ? push.buttons : [];
+  // Only well-formed buttons: one without a title would stop the push from showing.
+  const buttons = Array.isArray(push.buttons)
+    ? push.buttons.filter((button) => typeof button?.title === 'string')
+    : [];
   const data: NotificationData = {
     kirora: {
       actionUrl: push.actionUrl,
@@ -223,7 +225,8 @@ async function report(
 /**
  * Whether `trackingUrl` is Kirora's: under `/t/p/` on the `apiUrl` the page registered
  * this browser with (or Kirora's own, if it can't be read), with no `.` or `..` segment
- * to climb out. Nothing is posted anywhere else.
+ * to climb out, nor a tab or newline, which URL parsing drops (so `.\t.` is `..`).
+ * Nothing is posted anywhere else.
  */
 async function isKirorasUrl(trackingUrl: string): Promise<boolean> {
   const saved = await readSubscription(self.registration.scope).catch(() => undefined);
@@ -231,7 +234,7 @@ async function isKirorasUrl(trackingUrl: string): Promise<boolean> {
   // Kirora's own never has a dot segment, in its path or query.
   return (
     trackingUrl.startsWith(prefix) &&
-    !/(^|[/\\])(\.|%2e){1,2}([/\\?#]|$)/i.test(trackingUrl.slice(prefix.length))
+    !/[\t\n\r]|(^|[/\\])(\.|%2e){1,2}([/\\?#]|$)/i.test(trackingUrl.slice(prefix.length))
   );
 }
 
@@ -251,9 +254,10 @@ const MAX_RETRY_WAIT_MS = 60_000;
 async function moveSubscription(event: PushSubscriptionChangeEvent): Promise<void> {
   const { scope, pushManager } = self.registration;
   const saved = await readSubscription(scope);
-  // Another service's subscription changed, or this browser never registered with Kirora.
+  // Another service's subscription changed, or this browser never registered with Kirora
+  // (or no longer is: a 404 or 409 below kept only the API address).
   if (
-    !saved ||
+    !saved?.subscription.endpoint ||
     (event.oldSubscription &&
       event.oldSubscription.endpoint !== saved.subscription.endpoint)
   ) {
@@ -291,8 +295,9 @@ async function moveSubscription(event: PushSubscriptionChangeEvent): Promise<voi
       return void (await saveSubscription(scope, moved));
     }
     // 404: no device has the old subscription. 409: another device has the new one.
+    // The API address stays, as tracking URLs are checked against it.
     if (status === 404 || status === 409) {
-      return void (await forgetSubscription(scope));
+      return void (await saveSubscription(scope, { ...saved, subscription: {} }));
     }
     const retry = status === 0 || status === 429 || status >= 500;
     if (!retry || attempt === MOVE_ATTEMPTS) return;

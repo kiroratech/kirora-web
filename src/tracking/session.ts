@@ -9,67 +9,124 @@ const SESSION_TIMEOUT_MS = 30 * 60_000;
 /** How often a visible page keeps its session alive: well inside the timeout. */
 export const SESSION_KEEPALIVE_MS = 5 * 60_000;
 
-/**
- * `owner` tells whose visit it is: a hash of the token subject of whoever was signed in
- * when it was active, or null before anyone was. Hashed because the session lives in a
- * cookie, which goes with every request to the site, and the subject is the user's id.
- */
-type StoredSession = { sessionId: string; lastActivityAt: number; owner?: string | null };
+/** At most this many live sessions are kept: one per user active in this browser. */
+const MAX_SESSIONS = 5;
+/** The key of a session begun before anyone signed in. */
+const NO_ONE = '';
 
-/** The session, in shared storage under `key`, which names the workspace. */
+type StoredSession = { sessionId: string; lastActivityAt: number };
+/**
+ * The live sessions, by whose they are: a hash of the token subject of the user active
+ * on it, or `NO_ONE`. Hashed because the sessions live in a cookie, which goes with every
+ * request to the site, and the subject is the user's id. One each, so two tabs signed in
+ * as different users each keep their own visit.
+ */
+type Sessions = Record<string, StoredSession>;
+
+/** The sessions, in shared storage under `key`, which names the workspace. */
 export type SessionStore = { storage: KeyValueStorage; key: string };
 
-export function endSession({ storage, key }: SessionStore): void {
-  storage.removeItem(key);
+/** Ends `owner`'s session, or with no owner given, every session. */
+export function endSession(store: SessionStore, owner?: string): void {
+  if (owner === undefined) {
+    store.storage.removeItem(store.key);
+    return;
+  }
+  const sessions = liveSessions(store);
+  delete sessions[sessionOwner(owner)];
+  save(store, sessions);
 }
 
 /**
- * Records `owner`'s activity on the current session. `started` is true if a new one
- * began: none was live, or it was another user's. Activity with no one signed in (a page
- * loading before `identify()`) continues whichever session is live, and a session begun
- * before sign-in becomes the user's who signs in.
+ * Records `owner`'s activity on their session. `started` is true if a new one began.
+ * Activity with no one signed in (a page loading before `identify()`) continues the
+ * latest live session, whoever's: a reload doesn't end a signed-in user's visit. Such a
+ * session is `borrowedFrom` that user, so it's left out of the events if someone else
+ * adopts them. A session begun before sign-in becomes the user's who signs in.
  */
 export function touchSession(
   store: SessionStore,
   owner: string | null,
-): { sessionId: string; started: boolean } {
-  const current = liveSession(store);
-  owner = owner === null ? null : ownerHash(owner);
-  const continues =
-    current !== null &&
-    (owner === null || (current.owner ?? null) === null || current.owner === owner);
-  const sessionId = continues ? current.sessionId : uuid();
-  save(store, sessionId, owner ?? current?.owner ?? null);
-  return { sessionId, started: !continues };
+): { sessionId: string; started: boolean; borrowedFrom?: string } {
+  const sessions = liveSessions(store);
+  let key: string;
+  if (owner === null) {
+    key = latest(sessions) ?? NO_ONE;
+  } else {
+    key = sessionOwner(owner);
+    if (!sessions[key] && sessions[NO_ONE]) {
+      sessions[key] = sessions[NO_ONE];
+      delete sessions[NO_ONE];
+    }
+  }
+  const current = sessions[key];
+  const sessionId = current?.sessionId ?? uuid();
+  sessions[key] = { sessionId, lastActivityAt: Date.now() };
+  save(store, sessions);
+  return {
+    sessionId,
+    started: !current,
+    ...(owner === null && key !== NO_ONE ? { borrowedFrom: key } : {}),
+  };
 }
 
 /**
- * Extends the current session without starting a new one, so time on a visible page
- * never ends a visit but a timer alone never begins one.
+ * Extends `owner`'s session (as `touchSession` picks it) without starting one, so time on
+ * a visible page never ends a visit but a timer alone never begins one.
  */
-export function keepSessionAlive(store: SessionStore): void {
-  const current = liveSession(store);
-  if (current) save(store, current.sessionId, current.owner ?? null);
+export function keepSessionAlive(store: SessionStore, owner: string | null): void {
+  const sessions = liveSessions(store);
+  const key = owner === null ? latest(sessions) : sessionOwner(owner);
+  const current = key === undefined ? undefined : sessions[key];
+  if (!current) return;
+  current.lastActivityAt = Date.now();
+  save(store, sessions);
 }
 
-/** Records activity on `sessionId` now. */
-function save(
-  { storage, key }: SessionStore,
-  sessionId: string,
-  owner: string | null,
-): void {
-  const session: StoredSession = { sessionId, lastActivityAt: Date.now(), owner };
-  storage.setItem(key, JSON.stringify(session));
+/** The key `owner`'s session is kept under, and that `borrowedFrom` names. */
+export function sessionOwner(owner: string): string {
+  return ownerHash(owner);
 }
 
-/** The session, unless there's none or it timed out. */
-function liveSession({ storage, key }: SessionStore): StoredSession | null {
-  const stored = readJson(storage, key) as StoredSession | null;
-  return stored &&
-    typeof stored.sessionId === 'string' &&
-    Date.now() - stored.lastActivityAt < SESSION_TIMEOUT_MS
-    ? stored
-    : null;
+/** Saves the newest `MAX_SESSIONS` of `sessions`, or removes them all if there are none. */
+function save({ storage, key }: SessionStore, sessions: Sessions): void {
+  const kept = Object.entries(sessions)
+    .sort(([, a], [, b]) => b.lastActivityAt - a.lastActivityAt)
+    .slice(0, MAX_SESSIONS);
+  if (kept.length === 0) storage.removeItem(key);
+  else storage.setItem(key, JSON.stringify(Object.fromEntries(kept)));
+}
+
+/** The sessions that haven't timed out; none if unreadable. */
+function liveSessions({ storage, key }: SessionStore): Sessions {
+  const stored = readJson(storage, key);
+  const live: Sessions = {};
+  if (typeof stored !== 'object' || stored === null) return live;
+  for (const [owner, session] of Object.entries(stored as Record<string, unknown>)) {
+    const { sessionId, lastActivityAt } = (session ?? {}) as Partial<StoredSession>;
+    if (
+      typeof sessionId === 'string' &&
+      typeof lastActivityAt === 'number' &&
+      Date.now() - lastActivityAt < SESSION_TIMEOUT_MS
+    ) {
+      live[owner] = { sessionId, lastActivityAt };
+    }
+  }
+  return live;
+}
+
+/** Whose session was active last, if any is live. */
+function latest(sessions: Sessions): string | undefined {
+  let found: string | undefined;
+  for (const owner in sessions) {
+    if (
+      found === undefined ||
+      sessions[owner]!.lastActivityAt > sessions[found]!.lastActivityAt
+    ) {
+      found = owner;
+    }
+  }
+  return found;
 }
 
 /**

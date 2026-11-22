@@ -39,7 +39,10 @@
     "dist",
     "llms.txt"
   ],
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/kirora-sw.js",
+    "./dist/kirora.min.js"
+  ],
   "publishConfig": {
     "access": "public",
     "provenance": true

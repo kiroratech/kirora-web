@@ -72,13 +72,16 @@ export class Tracker {
   /** Extends the current session without starting one, e.g. while the page is visible. */
   keepSessionAlive(): void {
     this.safely(() => {
-      if (this.sessionsOn) keepSessionAlive(this.sessionStore);
+      if (this.sessionsOn) keepSessionAlive(this.sessionStore, this.owner());
     });
   }
 
-  /** Ends the session, so the next activity starts another: for a sign-out. */
-  endSession(): void {
-    this.safely(() => endSession(this.sessionStore));
+  /**
+   * Ends `owner`'s session, so their next activity starts another: for a sign-out. With
+   * no owner, ends every session.
+   */
+  endSession(owner?: string): void {
+    this.safely(() => endSession(this.sessionStore, owner));
   }
 
   /** Forgets queued events and the session, as when consent is withdrawn. */
@@ -121,14 +124,14 @@ export class Tracker {
     // Decided now: whoever signs in or out later, this event stays this user's.
     const owner = this.owner();
     page ??= pageContext();
-    const sessionId = this.touchSession(owner, page);
-    this.capture(owner, name, snapshot, page, sessionId);
+    this.capture(owner, name, snapshot, page, this.touchSession(owner, page));
   }
 
-  /** Returns the session id, if sessions are on and tracking is allowed. */
-  private touchSession(owner: EventOwner, page?: PageContext): string | undefined {
+  /** Returns the session, if sessions are on and tracking is allowed. */
+  private touchSession(owner: EventOwner, page?: PageContext): Session | undefined {
     if (!this.sessionsOn) return undefined;
-    const { sessionId, started } = touchSession(this.sessionStore, owner);
+    const { sessionId, started, borrowedFrom } = touchSession(this.sessionStore, owner);
+    const session = { sessionId, borrowedFrom };
     if (started) {
       page ??= pageContext();
       this.capture(
@@ -136,10 +139,10 @@ export class Tracker {
         SESSION_STARTED_EVENT,
         sessionStartedProperties(page),
         page,
-        sessionId,
+        session,
       );
     }
-    return sessionId;
+    return session;
   }
 
   private safely(step: () => void): void {
@@ -169,7 +172,7 @@ export class Tracker {
     name: string,
     properties: EventProperties,
     page: PageContext,
-    sessionId: string | undefined,
+    session: Session | undefined,
   ): void {
     const occurredAt = eventTime().toISOString();
     const event = this.redacted({
@@ -177,7 +180,7 @@ export class Tracker {
       properties,
       context: {
         ...page,
-        ...(sessionId ? { sessionId } : {}),
+        ...(session ? { sessionId: session.sessionId } : {}),
         device: {
           id: this.parts.deviceId(),
         },
@@ -193,6 +196,7 @@ export class Tracker {
         context: event.context,
       },
       owner,
+      session?.borrowedFrom,
     );
   }
 
@@ -250,15 +254,21 @@ export class Tracker {
     }
   }
 
-  /** Queues as `owner`, then lets delivery decide when to send. */
-  private enqueue(event: QueuedEvent, owner: EventOwner): void {
+  /**
+   * Queues as `owner`, then lets delivery decide when to send. `sessionOwner`: the user
+   * whose session an event tracked before sign-in continued.
+   */
+  private enqueue(event: QueuedEvent, owner: EventOwner, sessionOwner?: string): void {
     const { queue, delivery, log } = this.parts;
-    queue.add(event, owner).then(
+    queue.add(event, owner, sessionOwner).then(
       (waiting) => delivery.onEventQueued(waiting),
       (error: unknown) => log('error', `${event.name} not tracked`, error),
     );
   }
 }
+
+/** The session an event is in, and whose it was, if it continued another user's. */
+type Session = { sessionId: string; borrowedFrom?: string };
 
 /** What made a value unsendable, without the value. */
 function reason(error: unknown): string {

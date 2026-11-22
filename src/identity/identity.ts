@@ -1,5 +1,5 @@
 import { KiroraError, UserTokenError } from '../errors.js';
-import type { AuthenticationFailure, KiroraOptions } from '../types.js';
+import type { AuthenticationFailureReason, KiroraOptions } from '../types.js';
 import { base64UrlDecode } from '../utils/base64url.js';
 import { withTimeout } from '../utils/timeout.js';
 import { uuid } from '../utils/uuid.js';
@@ -70,16 +70,19 @@ export class Identity {
   private pendingRefresh: Promise<string> | null = null;
   /** Asks for a fresh token before the current one expires. */
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The latest user whose token Kirora accepted: their sign-in stands. */
+  accepted: SignedInUser | null = null;
   /** The user whose token failure the app was told of, so it's told once. */
   private failureReported: SignedInUser | null = null;
   /**
    * The user identify() is still signing in, and a token failure held back meanwhile:
    * if identify() rejects for it, the app hears of it there, so it's reported once.
    */
-  private identifying: { user: SignedInUser; held?: AuthenticationFailure } | null = null;
+  private identifying: { user: SignedInUser; held?: AuthenticationFailureReason } | null =
+    null;
   constructor(
     private readonly fetchUserToken: KiroraOptions['fetchUserToken'],
-    private readonly onFailed?: (reason: AuthenticationFailure) => void,
+    private readonly onFailed?: (reason: AuthenticationFailureReason) => void,
   ) {}
 
   /** The signed-in user, or null. */
@@ -150,7 +153,7 @@ export class Identity {
    * Tells the app `user`'s token failed in the background, if they're still signed in and
    * it hasn't been told since their token was last accepted or identify() was called.
    */
-  authFailed(user: SignedInUser, reason: AuthenticationFailure): void {
+  authFailed(user: SignedInUser, reason: AuthenticationFailureReason): void {
     if (this.owner !== user || this.failureReported === user) return;
     if (this.identifying?.user === user) {
       this.identifying.held ??= reason;
@@ -174,6 +177,7 @@ export class Identity {
 
   /** Kirora accepted `user`'s token: a later failure is news again. */
   tokenAccepted(user: SignedInUser): void {
+    this.accepted = user;
     if (this.failureReported === user) this.failureReported = null;
   }
 
@@ -253,7 +257,12 @@ export class Identity {
     const refresh = (this.pendingRefresh ??= this.fetchToken());
     try {
       const userToken = await refresh;
-      if (this.user !== user || subjectOf(userToken) !== user.tokenSubject) return null;
+      // Only a token naming the same user: one naming no one can't be told apart from
+      // another user's.
+      const subject = subjectOf(userToken);
+      if (this.user !== user || subject === null || subject !== user.tokenSubject) {
+        return null;
+      }
       user.token = userToken;
       user.expiresAt = expiresAtOf(userToken, true);
       // Sets the next refresh, a minute before it expires.
@@ -291,7 +300,12 @@ export class Identity {
       throw new KiroraError('pass identify() a user token, or set fetchUserToken');
     }
     try {
-      return await withTimeout(this.fetchUserToken(), TOKEN_TIMEOUT_MS);
+      const token = await withTimeout(this.fetchUserToken(), TOKEN_TIMEOUT_MS);
+      // No token is a failed fetch, never an empty token sent to Kirora.
+      if (typeof token !== 'string' || token === '') {
+        throw new Error('fetchUserToken returned no token');
+      }
+      return token;
     } catch (error) {
       throw new UserTokenError(error);
     }
@@ -338,8 +352,8 @@ function subjectOf(userToken: string): string | null {
 
 /**
  * When `userToken`, just arrived, stops working (epoch ms): at its `exp`. One already past
- * it as it arrives meets a device clock that's ahead, so its lifetime (`exp` less `iat`)
- * is counted from now instead. Undefined if that can't be told, or for one a refresh just
+ * it as it arrives, or issued in the future, meets a device clock that's off, so its
+ * lifetime (`exp` less `iat`) is counted from now instead. Undefined if that can't be told, or for one a refresh just
  * gave that's due at once: asking again would get the same, so it's replaced once Kirora
  * refuses it. Either way it waits for a refusal.
  */
@@ -348,7 +362,10 @@ function expiresAtOf(userToken: string, refreshed: boolean): number | undefined 
   if (!isTime(exp)) return undefined;
   const now = Date.now();
   let expiresAt = exp * 1000;
-  if (expiresAt <= now) {
+  // Issued in the future (by more than a refresh's lead): the device clock is behind.
+  // Already expired as it arrives: the clock may be ahead. Either way the token's
+  // lifetime is counted from now instead, if `iat` says what it is.
+  if (expiresAt <= now || (isTime(iat) && iat * 1000 > now + REFRESH_AHEAD_MS)) {
     if (!isTime(iat)) return undefined;
     expiresAt = now + (exp - iat) * 1000;
   }

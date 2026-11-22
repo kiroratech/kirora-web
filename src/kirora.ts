@@ -233,7 +233,7 @@ export class Kirora {
       if (this.identity.user?.subject !== user.subject) {
         await this.queue.clearOwnedBy((owner) => owner === user.subject);
       }
-      if (signedOut) this.tracker.endSession();
+      if (signedOut) this.tracker.endSession(user.subject);
       // Kept past a consent withdrawal only so this browser could be detached.
       if (this.consent.refused) this.forgetDeviceIdIfUnused();
     } catch (error) {

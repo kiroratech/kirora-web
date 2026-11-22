@@ -1,5 +1,12 @@
+import { isPageHidden } from '../utils/page-hidden.js';
 import type { KeyValueStorage } from '../storage/device-storage.js';
-import { LockUnavailable, withCrossTabLock } from '../storage/cross-tab-lock.js';
+import {
+  LockUnavailable,
+  NOT_YET,
+  readRevision,
+  withCrossTabLock,
+  writeRevision,
+} from '../storage/cross-tab-lock.js';
 import { STORAGE_KEYS } from '../storage/keys.js';
 import { KiroraError } from '../errors.js';
 import { utf8Length } from '../utils/utf8.js';
@@ -20,7 +27,11 @@ export type QueuedEvent = {
  */
 export type EventOwner = string | null;
 
-type StoredEvent = { owner: EventOwner; event: QueuedEvent };
+/**
+ * `sessionOwner`: for an event tracked before sign-in that continued a signed-in user's
+ * session (a reload), whose session it was, as `sessionOwner()` names them.
+ */
+type StoredEvent = { owner: EventOwner; event: QueuedEvent; sessionOwner?: string };
 
 /**
  * The queue as last read or written, the exact string stored for it and, if it's been
@@ -64,16 +75,26 @@ export class EventQueue {
   private batch:
     { stored: StoredEvent[]; jsons: string[]; written: Promise<number> } | undefined;
 
+  /** Beside the queue: the revision of the write it shows (see `readRevision`). */
+  private readonly revisionKey: string;
+  /** Writes made, to tell whether a locked operation wrote. */
+  private writes = 0;
+  /** This tab's operations other than adds still waiting for, or holding, the lock. */
+  private waiting = 0;
+
   constructor(
-    private readonly storage: KeyValueStorage,
+    private readonly storage: KeyValueStorage & { readonly persistent?: boolean },
     namespace: string,
   ) {
     this.key = STORAGE_KEYS.events(namespace);
+    this.revisionKey = `${this.key}:revision`;
+    watchOtherTabs();
   }
 
   /** Returns how many events wait. Rejects an event too large to keep at all. */
-  add(event: QueuedEvent, owner: EventOwner): Promise<number> {
-    const entry: StoredEvent = { owner, event };
+  add(event: QueuedEvent, owner: EventOwner, sessionOwner?: string): Promise<number> {
+    const entry: StoredEvent =
+      sessionOwner === undefined ? { owner, event } : { owner, event, sessionOwner };
     // Encoded once, here: the write reuses it.
     const json = JSON.stringify(entry);
     // `[` and `]` around it, were it the only one.
@@ -82,15 +103,34 @@ export class EventQueue {
         new KiroraError('the event is larger than the queue can keep'),
       );
     }
+    // Hidden, the page may be closing before a lock is granted: written at once, with the
+    // batch still waiting, unlocked. Only another tab writing in the same instant could
+    // race it, and losing the event to the page closing is likelier.
+    // Only with none of this tab's other operations waiting: written ahead of them, the
+    // event could be cleared by one asked for before it (consent withdrawn, say).
+    if (isPageHidden() && this.waiting === 0) {
+      const stored = [...(this.batch?.stored.splice(0) ?? []), entry];
+      const jsons = [...(this.batch?.jsons.splice(0) ?? []), json];
+      this.read();
+      const appending = appended(this.cache, stored, jsons);
+      this.write(appending.kept, appending.json, appending.bytes);
+      // Counted like a locked write, so a tab under the lock waits to see it.
+      if (this.storage.persistent !== false) {
+        writeRevision(this.key, this.nextRevision(0)).catch(() => undefined);
+      }
+      return Promise.resolve(appending.kept.length);
+    }
     if (this.batch) {
       this.batch.stored.push(entry);
       this.batch.jsons.push(json);
       return this.batch.written;
     }
     const batch = { stored: [entry], jsons: [json] };
-    const written = this.exclusively(() => {
+    const written = this.exclusively(true, () => {
       // Later adds start a batch of their own.
       if (this.batch?.stored === batch.stored) this.batch = undefined;
+      // Written already, as the page was hidden.
+      if (batch.stored.length === 0) return this.read().length;
       this.read();
       const appending = appended(this.cache, batch.stored, batch.jsons);
       this.write(appending.kept, appending.json, appending.bytes);
@@ -111,16 +151,31 @@ export class EventQueue {
         .filter((stored) => stored.owner === owner)
         .slice(0, count)
         .map((stored) => stored.event);
-    return now ? Promise.resolve(pick()) : this.exclusively(pick);
+    return now ? Promise.resolve(pick()) : this.exclusively(false, pick);
   }
 
   /**
    * Makes the events from before sign-in `owner`'s, as they sign in: from now on they
-   * go as `owner` or not at all, whoever signs in next or in another tab. Returns their
-   * idempotency keys, for `release()`.
+   * go as `owner` or not at all, whoever signs in next or in another tab. One that
+   * continued another user's session leaves that session out, so the two users' visits
+   * aren't joined; `ownSession` names `owner`'s. Returns their idempotency keys, for
+   * `release()`.
    */
-  adopt(owner: string): Promise<Set<string>> {
-    return this.reassign(null, owner);
+  adopt(
+    owner: string,
+    stillSignedIn: () => boolean,
+    ownSession: string,
+  ): Promise<Set<string>> {
+    // The marker stays, so one given back by `release()` is checked again at the next
+    // adoption.
+    return this.reassign(null, owner, stillSignedIn, (adopted) => {
+      if (adopted.sessionOwner === undefined || adopted.sessionOwner === ownSession) {
+        return adopted;
+      }
+      const context = { ...adopted.event.context };
+      delete context.sessionId;
+      return { ...adopted, event: { ...adopted.event, context } };
+    });
   }
 
   /**
@@ -160,13 +215,14 @@ export class EventQueue {
     from: EventOwner,
     to: EventOwner,
     picks: (event: QueuedEvent) => boolean = () => true,
+    adjust: (entry: StoredEvent) => StoredEvent = (entry) => entry,
   ): Promise<Set<string>> {
-    return this.exclusively(() => {
+    return this.exclusively(false, () => {
       const moved = new Set<string>();
       const stored = this.read().map((entry) => {
         if (entry.owner !== from || !picks(entry.event)) return entry;
         moved.add(entry.event.idempotencyKey);
-        return { ...entry, owner: to };
+        return adjust({ ...entry, owner: to });
       });
       if (moved.size > 0 || !this.cache.exact) this.write(stored);
       return moved;
@@ -175,7 +231,7 @@ export class EventQueue {
 
   /** Rewrites the queue without what `test` rejects, if that's anything or it's unreadable. */
   private keep(test: (stored: StoredEvent) => boolean): Promise<void> {
-    return this.exclusively(() => {
+    return this.exclusively(false, () => {
       const stored = this.read();
       const kept = stored.filter(test);
       if (kept.length < stored.length || !this.cache.exact) this.write(kept);
@@ -195,7 +251,10 @@ export class EventQueue {
     json = JSON.stringify(stored),
     bytes?: number,
   ): void {
-    const empty = stored.length === 0;
+    this.writes++;
+    // Emptied by removing the key, except where this page fell back to memory: there,
+    // removing it would delete what other tabs have stored since.
+    const empty = stored.length === 0 && this.storage.persistent !== false;
     if (empty) this.storage.removeItem(this.key);
     else this.storage.setItem(this.key, json);
     this.cache = {
@@ -207,29 +266,132 @@ export class EventQueue {
   }
 
   /**
-   * Runs `operation` under a lock every tab shares: a Web Lock, or where there are none,
-   * an IndexedDB transaction. Unlocked only where neither works (IndexedDB refused in a
-   * private window). Operations run in the order they're asked for, so an add asked for
-   * after another operation joins no batch from before it.
+   * Runs `operation` under a lock every tab shares: a Web Lock, or where there are none
+   * or they're refused (an opaque-origin frame), an IndexedDB transaction. Unlocked only
+   * where neither works (IndexedDB refused in a private window, or never opening).
+   * Operations run in the order they're asked for, so an add asked for after another
+   * operation joins no batch from before it.
    */
-  private exclusively<Result>(operation: () => Result): Promise<Result> {
+  private exclusively<Result>(adding: boolean, operation: () => Result): Promise<Result> {
     this.batch = undefined;
     const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
     // Always a tick later, even where a free lock is granted at once, so adds made in the
     // same tick have joined their batch by the time it's written.
-    return Promise.resolve().then(() => {
-      if (locks) {
-        // Async, so a throwing operation still releases the lock (Node keeps it otherwise).
-        // eslint-disable-next-line @typescript-eslint/require-await
-        return locks.request(this.key, async () => operation());
-      }
-      if (typeof indexedDB === 'undefined') return operation();
-      return withCrossTabLock(operation).catch((error: unknown) => {
+    const done = Promise.resolve().then(() => {
+      if (!locks) return this.underIndexedDbLock(operation);
+      let ran = false;
+      return locks
+        .request(this.key, () => {
+          ran = true;
+          return this.caughtUpThen(operation);
+        })
+        .catch((error: unknown) => {
+          if (ran) throw error;
+          return this.underIndexedDbLock(operation);
+        });
+    });
+    if (!adding) {
+      this.waiting++;
+      const settled = () => void this.waiting--;
+      done.then(settled, settled);
+    }
+    return done;
+  }
+
+  /**
+   * Under the Web Lock: waits for this tab's `localStorage` to show the latest write any
+   * tab made (see `readRevision`), runs `operation`, and records its write's revision.
+   */
+  private async caughtUpThen<Result>(operation: () => Result): Promise<Result> {
+    const latest = await readRevision(this.key).catch(() => undefined);
+    // Without IndexedDB (some private windows) nothing says which write to wait for. While
+    // another tab is writing the queue, a moment lets its latest write arrive: in Chromium
+    // that cut the events lost between two busy tabs from about 20% to about 0.3%.
+    if (latest === undefined && writtenElsewhereLately(this.key)) await pause();
+    // Never for good, as every tab waits on the lock meanwhile: a write lost to a full
+    // quota in another tab never shows. By time, as a hidden tab's timers are throttled.
+    const giveUpAt = Date.now() + MAX_CATCH_UP_MS;
+    while (latest !== undefined && this.revision() < latest && Date.now() < giveUpAt) {
+      await pause();
+    }
+    const writes = this.writes;
+    const result = operation();
+    if (
+      latest !== undefined &&
+      this.writes !== writes &&
+      this.storage.persistent !== false
+    ) {
+      await writeRevision(this.key, this.nextRevision(latest)).catch(() => undefined);
+    }
+    return result;
+  }
+
+  /**
+   * Under the IndexedDB lock, where there are no Web Locks: tried again shortly while
+   * `localStorage` hasn't caught up. Unlocked only where IndexedDB can't be used.
+   */
+  private async underIndexedDbLock<Result>(operation: () => Result): Promise<Result> {
+    if (typeof indexedDB === 'undefined') return operation();
+    const giveUpAt = Date.now() + MAX_CATCH_UP_MS;
+    for (;;) {
+      let done: Result | typeof NOT_YET;
+      try {
+        done = await withCrossTabLock((latest) => {
+          if (this.revision() < latest && Date.now() < giveUpAt) return NOT_YET;
+          const writes = this.writes;
+          const result = operation();
+          return this.writes !== writes && this.storage.persistent !== false
+            ? { result, revision: this.nextRevision(latest) }
+            : { result };
+        }, this.key);
+      } catch (error) {
         if (error instanceof LockUnavailable) return operation();
         throw error;
-      });
-    });
+      }
+      if (done !== NOT_YET) return done;
+      await pause();
+    }
   }
+
+  /** The revision of the latest write this tab's `localStorage` shows. */
+  private revision(): number {
+    return Number(this.storage.getItem(this.revisionKey)) || 0;
+  }
+
+  /** Records a write after revision `latest` beside the queue, and returns its revision. */
+  private nextRevision(latest: number): number {
+    const next = Math.max(latest, this.revision()) + 1;
+    this.storage.setItem(this.revisionKey, String(next));
+    return next;
+  }
+}
+
+/** When another tab last wrote each `localStorage` key, as `storage` events tell. */
+const writtenElsewhere = new Map<string, number>();
+let watchingOtherTabs = false;
+
+function watchOtherTabs(): void {
+  if (watchingOtherTabs || typeof addEventListener !== 'function') return;
+  watchingOtherTabs = true;
+  addEventListener('storage', ({ key }) => {
+    if (key) writtenElsewhere.set(key, Date.now());
+  });
+}
+
+/** Whether another tab wrote `key` in the last few seconds. */
+function writtenElsewhereLately(key: string): boolean {
+  return Date.now() - (writtenElsewhere.get(key) ?? 0) < OTHER_TAB_ACTIVE_MS;
+}
+
+/** Another tab that wrote the queue this recently may still be writing it. */
+const OTHER_TAB_ACTIVE_MS = 10_000;
+
+/** How long `localStorage` is waited for before going ahead regardless. */
+const MAX_CATCH_UP_MS = 100;
+
+/** Long enough for another tab's write to arrive: a task alone isn't, in Chromium. */
+function pause(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 1));
 }
 
 /** The stored queue. Skips anything unreadable rather than losing the whole queue to it. */

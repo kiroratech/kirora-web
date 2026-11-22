@@ -222,6 +222,8 @@ it('forgets the device id kept for detaching, once logout has detached the brows
 
 it('reuses its own subscription where the browser cannot say which key made it', async () => {
   stubLocalStorage();
+  // The worker's record, which outlives the logout, says the subscription is ours.
+  stubIndexedDB();
   stubWebPush();
   const server = fakeKirora();
   const kirora = pushClient();
@@ -672,3 +674,109 @@ it('cancels the subscription at once when a detachment is out of time already', 
   expect(await browserSubscription()).toBeNull();
   kirora.destroy();
 });
+
+// Found in the 22 November 2026 pre-release audit.
+
+it('detaches with the lastSeenAt of a registration still under way at logout', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  let holding = false;
+  const server = fakeKirora((request) => holding && request.method === 'PUT');
+  const deletes: string[] = [];
+  const kiroraFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+    if (init.method === 'DELETE') deletes.push(new URL(url).search);
+    return kiroraFetch(url, init);
+  });
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  // A day later the registration is due again, and is renewed as push is switched on.
+  const record = JSON.parse(localStorage.getItem(REGISTRATION_KEY)!) as { at: number };
+  record.at -= 2 * 24 * 60 * 60_000;
+  localStorage.setItem(REGISTRATION_KEY, JSON.stringify(record));
+  holding = true;
+  const enabling = kirora.setPushEnabled(true);
+  await vi.waitFor(() => expect(server.held).toHaveLength(1));
+  const loggingOut = kirora.logout();
+  server.release();
+  await Promise.all([enabling, loggingOut]);
+  // The renewal's lastSeenAt (the second registration's), or Kirora would keep it (409).
+  expect(deletes).toEqual([
+    `?lastSeenAt=${encodeURIComponent('2026-11-01T00:00:02.000Z')}`,
+  ]);
+});
+
+it('cancels the subscription when push is switched off during its first registration', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  const server = fakeKirora((request) => request.method === 'PUT');
+  const kirora = pushClient();
+  const signingIn = kirora.identify(tokenFor('alice'));
+  await vi.waitFor(() => expect(server.held).toHaveLength(1));
+  const switchingOff = kirora.setPushEnabled(false);
+  server.release();
+  await Promise.all([signingIn, switchingOff]);
+  expect(await browserSubscription()).toBeNull();
+});
+
+it('takes back its own subscription after a logout, once the push app changed its key', async () => {
+  stubLocalStorage();
+  stubIndexedDB();
+  stubWebPush();
+  const server = fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  await kirora.logout();
+  // The push app was replaced since: the subscription has the old app's key.
+  const old = await browserSubscription();
+  Object.defineProperty(old, 'options', {
+    value: { applicationServerKey: OTHER_KEY.buffer },
+  });
+
+  await kirora.identify(tokenFor('bob'));
+
+  expect(keyOf(await browserSubscription())).toEqual(bytesOf(PUSH_APP_KEY));
+  expect(deviceChanges(server.handled).at(-1)).toBe('bob');
+});
+
+it('uses the service worker the site registered itself, rather than registering a copy', async () => {
+  stubLocalStorage();
+  stubWebPush();
+  fakeKirora();
+  const register = vi.spyOn(navigator.serviceWorker, 'register');
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  expect(await browserSubscription()).not.toBeNull();
+  expect(register).not.toHaveBeenCalled();
+});
+
+it("leaves alone another service's subscription where the browser cannot say its key", async () => {
+  stubLocalStorage();
+  stubIndexedDB();
+  stubWebPush();
+  const server = fakeKirora();
+  const registration = await navigator.serviceWorker.getRegistration();
+  const theirs = await registration!.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: OTHER_KEY,
+  });
+  // As in Firefox 74, which has no PushSubscription.options.
+  Object.defineProperty(theirs, 'options', { value: undefined });
+  const kirora = pushClient();
+
+  await kirora.identify(tokenFor('alice'));
+
+  expect(await browserSubscription()).toBe(theirs);
+  expect(deviceChanges(server.handled)).toEqual([]);
+});
+
+it("registers the browser where the worker's IndexedDB record never answers (Safari 14)", async () => {
+  stubLocalStorage();
+  stubWebPush();
+  // indexedDB.open() left unanswered.
+  vi.stubGlobal('indexedDB', { open: () => ({}) });
+  const server = fakeKirora();
+  const kirora = pushClient();
+  await kirora.identify(tokenFor('alice'));
+  expect(deviceChanges(server.handled)).toEqual(['alice']);
+}, 10_000);

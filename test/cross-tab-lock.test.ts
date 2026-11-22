@@ -84,12 +84,14 @@ it('reads and writes the queue inside an IndexedDB read-write transaction', asyn
 
   const queue = new (await loadQueue())(storage, 'workspace');
   await queue.add(event('Pricing Viewed'), null);
-  expect(await queue.adopt('ada')).toEqual(new Set(['Pricing Viewed']));
+  expect(await queue.adopt('ada', () => true, 'x')).toEqual(new Set(['Pricing Viewed']));
   expect(transactions.every((made) => made === 'kirora-locks/locks/readwrite')).toBe(
     true,
   );
   expect(transactions.length).toBeGreaterThan(0);
-  expect(writes).toEqual([true, true]);
+  // The queue and the revision beside it, each time.
+  expect(writes.length).toBeGreaterThan(0);
+  expect(writes.every(Boolean)).toBe(true);
 });
 
 it('lets only the first of two tabs adopt an event, in the order they asked', async () => {
@@ -100,7 +102,10 @@ it('lets only the first of two tabs adopt an event, in the order they asked', as
   await new EventQueue(storage, 'workspace').add(event('Pricing Viewed'), null);
   const adaTab = new EventQueue(storage, 'workspace');
   const bobTab = new EventQueue(storage, 'workspace');
-  const [ada, bob] = await Promise.all([adaTab.adopt('ada'), bobTab.adopt('bob')]);
+  const [ada, bob] = await Promise.all([
+    adaTab.adopt('ada', () => true, 'x'),
+    bobTab.adopt('bob', () => true, 'y'),
+  ]);
   expect(ada).toEqual(new Set(['Pricing Viewed']));
   expect(bob).toEqual(new Set());
   expect((await bobTab.oldest(10, 'bob')).length).toBe(0);
@@ -124,7 +129,7 @@ it('still works, unlocked, where IndexedDB is refused', async () => {
   });
   const queue = new (await loadQueue())(memoryStorage(), 'workspace');
   await queue.add(event('Pricing Viewed'), null);
-  expect(await queue.adopt('ada')).toEqual(new Set(['Pricing Viewed']));
+  expect(await queue.adopt('ada', () => true, 'x')).toEqual(new Set(['Pricing Viewed']));
   expect(opened).toBeGreaterThan(0);
 });
 

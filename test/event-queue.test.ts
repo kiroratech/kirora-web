@@ -11,7 +11,7 @@ const event = (name: string): QueuedEvent => ({
 });
 
 const names = async (queue: EventQueue) => {
-  await queue.adopt('ada');
+  await queue.adopt('ada', () => true, 'x');
   return (await queue.oldest(100, 'ada')).map((queued) => queued.name);
 };
 

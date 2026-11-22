@@ -1,3 +1,5 @@
+import { isPageHidden } from '../utils/page-hidden.js';
+import { sessionOwner } from '../tracking/session.js';
 import type { ClientApi } from '../api/client-api.js';
 import type { Identity, SignedInUser } from '../identity/identity.js';
 import { fieldErrors, KiroraApiError, UserTokenError } from '../errors.js';
@@ -18,6 +20,8 @@ const ENVELOPE_BYTES = 64;
 const FLUSH_AT_EVENTS = 20;
 const FLUSH_INTERVAL_MS = 30_000;
 const MAX_RETRY_DELAY_MS = 5 * 60_000;
+/** The longest delay `setTimeout` takes. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 /**
  * Kirora's one refusal of a whole batch that holds for good: the plan lacks the feature.
  * Any other 4xx (a 403, 404 or 409, say) never comes from `/events/batch` itself but from
@@ -64,8 +68,14 @@ export class EventDelivery {
    */
   private readonly inFlight = new Set<string>();
   /**
-   * The events the latest sign-in adopted, until Kirora accepts a batch as that user. A
-   * token refused before then means the sign-in failed, so they're given back.
+   * Bytes of keepalive requests on their way: the browser allows 64 KiB in all, so sends
+   * while hidden share our 60 KB between them.
+   */
+  private keepaliveBytes = 0;
+
+  /**
+   * The events the latest sign-in adopted, until Kirora accepts that user's token on any
+   * request. A token refused before then means the sign-in failed, so they're given back.
    */
   private adoption: { user: SignedInUser; keys: Set<string> } | undefined;
 
@@ -97,14 +107,21 @@ export class EventDelivery {
    * refuses their token before accepting a batch.
    */
   async adopt(user: SignedInUser): Promise<void> {
-    const keys = await this.queue.adopt(user.subject);
+    // Nothing for a sign-in a later identify() or logout() replaced while this waited for
+    // the lock: the events are for whoever is signed in by then.
+    const keys = await this.queue.adopt(
+      user.subject,
+      () => this.identity.user === user,
+      sessionOwner(user.subject),
+    );
     this.adoption = keys.size > 0 ? { user, keys } : undefined;
   }
 
   /** After an event is queued: send at once if enough wait, otherwise soon. */
   onEventQueued(waiting: number): void {
     if (!this.identity.user) return;
-    if (waiting >= FLUSH_AT_EVENTS) void this.flushWhenDue();
+    // Hidden, the page may be closing: an event tracked as it goes goes with it.
+    if (waiting >= FLUSH_AT_EVENTS || isPageHidden()) void this.flushWhenDue();
     else this.schedule(Date.now() + FLUSH_INTERVAL_MS);
   }
 
@@ -141,9 +158,12 @@ export class EventDelivery {
       this.nextFlush ??= this.flushing.then(runNext, runNext);
       return this.nextFlush;
     }
-    const sending = this.send().finally(() => {
-      if (this.flushing === sending) this.flushing = null;
-    });
+    // Never rejects: it's started by timers and page events, where nothing would catch it.
+    const sending = this.send()
+      .catch((error: unknown) => this.log('error', 'Events not sent', error))
+      .finally(() => {
+        if (this.flushing === sending) this.flushing = null;
+      });
     this.flushing = sending;
     return sending;
   }
@@ -182,22 +202,29 @@ export class EventDelivery {
     while (mayStillSend()) {
       const hidden = isPageHidden();
       // Read at once while hidden: the page may be going away.
-      const batch = fitBatch(
+      const { batch, bytes } = fitBatch(
         (await this.queue.oldest(maxEvents, user.subject, hidden)).filter(
           (event) => !this.inFlight.has(event.idempotencyKey),
         ),
+        hidden ? MAX_KEEPALIVE_BYTES - this.keepaliveBytes : MAX_BATCH_BYTES,
         hidden,
       );
       // Consent may have been withdrawn, or the user changed, while the queue was read.
       if (batch.length === 0 || !mayStillSend()) return;
       const keys = batch.map((event) => event.idempotencyKey);
       for (const key of keys) this.inFlight.add(key);
+      const keepaliveBytes = hidden ? bytes : 0;
+      this.keepaliveBytes += keepaliveBytes;
       let outcome: Awaited<ReturnType<EventDelivery['sendBatch']>>;
+      // The answer's Retry-After, for what it leaves unsettled: this send's own, as sends
+      // while hidden overlap.
+      const answer = { retryAfterMs: 0 };
       try {
-        outcome = await this.sendBatch(user, batch, hidden);
+        outcome = await this.sendBatch(user, batch, hidden, answer);
         // Still on their way until removed, so another send can't pick them up again.
         if (outcome instanceof Set) await this.queue.remove(outcome);
       } finally {
+        this.keepaliveBytes -= keepaliveBytes;
         for (const key of keys) this.inFlight.delete(key);
       }
       if (outcome === 'split') {
@@ -209,7 +236,8 @@ export class EventDelivery {
       maxEvents = EVENT_BATCH_SIZE;
       if (outcome.size < batch.length) {
         this.log('debug', `Retrying ${batch.length - outcome.size} events later`);
-        this.retryLater(user);
+        // Never sooner than the answer's Retry-After, as for a 429.
+        this.retryLater(user, undefined, answer.retryAfterMs);
         return;
       }
       this.resetBackoff(user);
@@ -224,6 +252,7 @@ export class EventDelivery {
     user: SignedInUser,
     batch: QueuedEvent[],
     keepalive: boolean,
+    answer: { retryAfterMs: number },
   ): Promise<Set<string> | 'split' | 'stop'> {
     const batchKeys = new Set(batch.map((event) => event.idempotencyKey));
     const sending = new AbortController();
@@ -235,6 +264,7 @@ export class EventDelivery {
         keepalive,
         as: user,
         signal: sending.signal,
+        onRetryAfter: (delayMs) => (answer.retryAfterMs = delayMs),
       });
       // Kirora took the token: what this sign-in adopted is its for good.
       if (this.adoption?.user === user) this.adoption = undefined;
@@ -295,10 +325,18 @@ export class EventDelivery {
     return 'stop';
   }
 
-  /** A sign-in whose token Kirora never accepted gives back the events it adopted. */
+  /**
+   * A sign-in whose token Kirora never accepted gives back the events it adopted. One
+   * Kirora accepted on any request (a push registration, say) stands: its events stay
+   * the user's, so a logout clears them rather than leaving them to the next user.
+   */
   private giveBackAdopted(user: SignedInUser): void {
     const { adoption } = this;
     if (adoption?.user !== user) return;
+    if (this.identity.accepted === user) {
+      this.adoption = undefined;
+      return;
+    }
     this.adoption = undefined;
     this.queue
       .release(user.subject, adoption.keys)
@@ -350,9 +388,10 @@ export class EventDelivery {
    * still signed in. A send still finishing for one who has signed out (e.g. after their
    * logout gave up waiting) leaves the next user's timing alone.
    */
-  private retryLater(user: SignedInUser, error?: unknown): void {
+  private retryLater(user: SignedInUser, error?: unknown, serverDelayMs = 0): void {
     if (this.identity.user !== user) return;
-    const retryAfterMs = (error instanceof KiroraApiError && error.retryAfterMs) || 0;
+    const retryAfterMs =
+      (error instanceof KiroraApiError && error.retryAfterMs) || serverDelayMs;
     // Jitter only ever adds to the server's delay, so throttled clients spread out.
     const delayMs = Math.max(
       jittered(this.retryDelayMs),
@@ -379,21 +418,28 @@ export class EventDelivery {
     if (this.timer !== undefined && this.timerAt <= due) return;
     clearTimeout(this.timer);
     this.timerAt = due;
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      void this.flushWhenDue();
-    }, due - Date.now());
+    // A longer delay overflows, and browsers fire at once: it waits and re-arms instead.
+    this.timer = setTimeout(
+      () => {
+        this.timer = undefined;
+        void this.flushWhenDue();
+      },
+      Math.min(due - Date.now(), MAX_TIMER_MS),
+    );
   }
 }
 
 /**
- * As many of `events`, oldest first, as fit in one request: 200 KB, or 60 KB while the
- * page is hidden, as keepalive allows. Always at least one, except that while hidden an
- * event too large for keepalive is skipped: it waits for the page to be shown again (a
- * request without keepalive could be cut off as the tab closes), and those behind it go.
+ * As many of `events`, oldest first, as fit in `maxBytes`: 200 KB, or while the page is
+ * hidden, what's left of keepalive's 60 KB. Always at least one, except that while hidden
+ * an event too large for what's left is skipped: it waits for the page to be shown again
+ * (a request without keepalive could be cut off as the tab closes), and those behind it go.
  */
-function fitBatch(events: QueuedEvent[], hidden: boolean): QueuedEvent[] {
-  const maxBytes = hidden ? MAX_KEEPALIVE_BYTES : MAX_BATCH_BYTES;
+function fitBatch(
+  events: QueuedEvent[],
+  maxBytes: number,
+  hidden: boolean,
+): { batch: QueuedEvent[]; bytes: number } {
   const batch: QueuedEvent[] = [];
   let bytes = ENVELOPE_BYTES;
   for (const event of events) {
@@ -403,18 +449,19 @@ function fitBatch(events: QueuedEvent[], hidden: boolean): QueuedEvent[] {
     batch.push(event);
     bytes += size;
   }
-  return batch;
+  return { batch, bytes };
 }
 
 /**
  * Whether Kirora's refusal of a batch blames events in it, so halving it finds the event
- * to drop. A 413 or 422 does; a 400 only if its `errors` name a field under `events`.
- * Otherwise it's a problem with the request (a header, say), so the events are kept.
+ * to drop. A 413 does; a 400 or 422 only if its `errors` name a field under `events`.
+ * Otherwise it's a problem with the request (a header, or a proxy answering every
+ * request), so the events are kept: halving would refuse, and drop, every one of them.
  */
 function blamesAnEvent(error: KiroraApiError): boolean {
-  if (error.status === 413 || error.status === 422) return true;
+  if (error.status === 413) return true;
   return (
-    error.status === 400 &&
+    (error.status === 400 || error.status === 422) &&
     (fieldErrors.get(error) ?? []).some(
       (fieldError) =>
         fieldError?.in === 'body' &&
@@ -456,9 +503,4 @@ function eventBytes(event: QueuedEvent): number {
 /** ±10%, so clients don't all retry at the same moment. */
 function jittered(delayMs: number): number {
   return delayMs * (1 - JITTER + Math.random() * 2 * JITTER);
-}
-
-/** While hidden, requests use keepalive so they survive the tab closing. */
-function isPageHidden(): boolean {
-  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
 }

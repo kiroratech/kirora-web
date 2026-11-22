@@ -26,6 +26,8 @@ type RequestOptions = {
   signal?: AbortSignal;
   /** Gives up sooner than the usual 30 seconds, e.g. within logout()'s deadline. */
   timeoutMs?: number;
+  /** Told a successful answer's `Retry-After`, for what it left unsettled. */
+  onRetryAfter?: (delayMs: number) => void;
 };
 
 /** A request still unanswered after this is abandoned and treated as a network failure. */
@@ -124,17 +126,24 @@ export class ClientApi {
     if (options.signal?.aborted) cancel();
     options.signal?.addEventListener('abort', cancel);
     const exchange = async () => {
-      const response = await fetch(`${apiUrl}/client/v1${path}`, {
-        method,
-        headers: {
-          authorization: `Bearer ${userToken}`,
-          'kirora-client-key': this.clientKey,
-          'kirora-sdk': SDK_NAME,
-          ...(hasBody ? { 'content-type': 'application/json' } : {}),
-        },
-        body: hasBody ? JSON.stringify(options.body) : undefined,
-        keepalive: options.keepalive,
-        signal: abort.signal,
+      const call = (keepalive?: boolean) =>
+        fetch(`${apiUrl}/client/v1${path}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${userToken}`,
+            'kirora-client-key': this.clientKey,
+            'kirora-sdk': SDK_NAME,
+            ...(hasBody ? { 'content-type': 'application/json' } : {}),
+          },
+          body: hasBody ? JSON.stringify(options.body) : undefined,
+          keepalive,
+          signal: abort.signal,
+        });
+      // Chrome 80 refuses keepalive for a request needing a CORS preflight, as ours do:
+      // tried again without, which still goes if the page is only hidden, not closing.
+      const response = await call(options.keepalive).catch((error: unknown) => {
+        if (!options.keepalive || abort.signal.aborted) throw error;
+        return call();
       });
       if (response.status === 401) {
         // Not read, so let the connection go.
@@ -142,6 +151,8 @@ export class ClientApi {
         return REFUSED;
       }
       if (!response.ok) throw await toApiError(response);
+      const delayMs = retryAfterMs(response.headers.get('retry-after'));
+      if (delayMs) options.onRetryAfter?.(delayMs);
       if (response.status === 204) return undefined;
       return ((await response.json()) as { data: unknown }).data;
     };
