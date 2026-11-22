@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { releasePlan } from './release-plan.mjs';
+import { registryView, releasePlan } from './release-plan.mjs';
 
 describe('releasePlan', () => {
   const plan = (version, published = [], latest = undefined) => {
@@ -51,6 +51,27 @@ describe('releasePlan', () => {
     expect(plan('1.2.0', ['1.2.0'], '1.2.0')).toEqual({
       publish: false,
       distTag: undefined,
+    });
+  });
+});
+
+describe('registryView', () => {
+  const view = { versions: ['0.1.0', '0.2.0'], 'dist-tags': { latest: '0.2.0' } };
+  const expected = { published: ['0.1.0', '0.2.0'], latest: '0.2.0' };
+
+  it('reads npm 11, which answers an object', () => {
+    expect(registryView(JSON.stringify(view))).toEqual(expected);
+  });
+
+  it('reads npm 12, which wraps the answer in an array', () => {
+    expect(registryView(JSON.stringify([view]))).toEqual(expected);
+  });
+
+  it('reads a package with a single version, whose versions npm gives as a string', () => {
+    const single = { versions: '0.1.0', 'dist-tags': { latest: '0.1.0' } };
+    expect(registryView(JSON.stringify(single))).toEqual({
+      published: ['0.1.0'],
+      latest: '0.1.0',
     });
   });
 });
