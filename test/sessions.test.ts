@@ -49,12 +49,16 @@ it('keeps a visit going while the page is visible, and starts one on return', as
     cookie: '',
     querySelector: () => null,
     addEventListener: (type: string, listener: () => void) => {
-      if (type === 'visibilitychange') listeners.push(listener);
+      if (type === 'visibilitychange') {
+        listeners.push(listener);
+      }
     },
   };
   const setVisibility = (state: 'visible' | 'hidden') => {
     page.visibilityState = state;
-    for (const listener of listeners) listener();
+    for (const listener of listeners) {
+      listener();
+    }
   };
   vi.stubGlobal('document', page);
   vi.stubGlobal('location', new URL('https://example.com/docs'));

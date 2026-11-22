@@ -38,13 +38,42 @@ export function recordEvents(): SentEvent[] {
   return sent;
 }
 
+/** An event as Kirora received it, with the user it was sent as. */
+export type SentAs = { user: string | undefined; name: string; sessionId?: string };
+
+/**
+ * Stubs `fetch` with a Kirora that accepts every event, unless `answer` answers a call
+ * first: a refusal, say, or a network failure. Returns the events accepted, in order,
+ * with who each was sent as.
+ */
+export function recordSends(
+  answer?: (url: string, init: RequestInit) => Promise<Response> | undefined,
+): SentAs[] {
+  const sent: SentAs[] = [];
+  vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+    const answered = answer?.(url, init);
+    if (answered) {
+      return answered;
+    }
+    const batch = JSON.parse(String(init.body)) as { events: SentEvent[] };
+    const user = userOf(init);
+    for (const { name, context } of batch.events) {
+      sent.push({ user, name, sessionId: context.sessionId });
+    }
+    return Promise.resolve(accepted(batch));
+  });
+  return sent;
+}
+
 /** A Map-backed `Storage`. While `full()` is true, writes throw as a full quota does. */
 export function memoryStorage(full = () => false) {
   const values = new Map<string, string>();
   return {
     getItem: (key: string) => values.get(key) ?? null,
     setItem: (key: string, value: string) => {
-      if (full()) throw new DOMException('Quota exceeded', 'QuotaExceededError');
+      if (full()) {
+        throw new DOMException('Quota exceeded', 'QuotaExceededError');
+      }
       values.set(key, value);
     },
     removeItem: (key: string) => void values.delete(key),
@@ -172,7 +201,9 @@ export function fakeKirora(
     requests.push(request);
     const answer = () => {
       handled.push(request);
-      if (request.path === '/events/batch') return accepted(init.body);
+      if (request.path === '/events/batch') {
+        return accepted(init.body);
+      }
       if (request.path === '/push-app') {
         return Response.json({
           data: { pushAppId: 'app_web', name: 'Web', vapidPublicKey: PUSH_APP_KEY },
@@ -188,7 +219,9 @@ export function fakeKirora(
       }
       return new Response(null, { status: 204 });
     };
-    if (!hold(request)) return Promise.resolve(answer());
+    if (!hold(request)) {
+      return Promise.resolve(answer());
+    }
     return new Promise<Response>((resolve) => held.push(() => resolve(answer())));
   });
   return {

@@ -54,22 +54,24 @@ export class ClientApi {
     private readonly identity: Identity,
   ) {
     const apiUrl = options.apiUrl ?? DEFAULT_API_URL;
+    this.clientKey = options.clientKey;
+
     const url = urlOf(apiUrl);
     // `api.example.com:443` parses too, as a URL with scheme `api.example.com:`.
-    const web = url && /^https?:$/.test(url.protocol) ? url : undefined;
-    // Path and all, without a trailing slash.
-    const path = web?.pathname.replace(/\/+$/, '');
-    if (web) {
-      // As Kirora writes its own addresses: host in lower case, no default port. The
-      // worker matches tracking URLs against it.
-      this.apiUrl = web.origin + path;
-    } else {
+    if (!url || !/^https?:$/.test(url.protocol)) {
       this.urlProblem = `apiUrl must be an address like ${DEFAULT_API_URL}`;
+      // A malformed apiUrl still gets a namespace of its own, never a real workspace's.
+      this.namespace = `${options.clientKey}@${apiUrl}`;
+      return;
     }
-    // Per deployment. A malformed apiUrl still gets a namespace of its own, never a real
-    // workspace's.
-    this.namespace = `${options.clientKey}@${web ? web.host + path : apiUrl}`;
-    this.clientKey = options.clientKey;
+
+    // Path and all, without a trailing slash.
+    const path = url.pathname.replace(/\/+$/, '');
+    // As Kirora writes its own addresses: host in lower case, no default port. The
+    // worker matches tracking URLs against it.
+    this.apiUrl = url.origin + path;
+    // Per deployment.
+    this.namespace = `${options.clientKey}@${url.host}${path}`;
   }
 
   /**
@@ -82,21 +84,31 @@ export class ClientApi {
     path: string,
     options: RequestOptions = {},
   ): Promise<Data | undefined> {
-    if (this.apiUrl === undefined) throw new KiroraError(this.urlProblem!);
+    if (this.apiUrl === undefined) {
+      throw new KiroraError(this.urlProblem!);
+    }
     const user = options.as ?? this.identity.user;
-    if (!user) throw new KiroraError('call identify() with a user token first');
+    if (!user) {
+      throw new KiroraError('call identify() with a user token first');
+    }
     // Refused for good: asking Kirora again would only be refused again.
-    if (this.identity.tokenRefused(user)) throw refusal();
+    if (this.identity.tokenRefused(user)) {
+      throw refusal();
+    }
     await this.identity.tokenReady(user);
     const sentToken = user.token;
     const answer = await this.send(this.apiUrl, method, path, sentToken, options);
-    if (answer !== REFUSED) return this.accepted(user, answer as Data | undefined);
+    if (answer !== REFUSED) {
+      return this.accepted(user, answer as Data | undefined);
+    }
 
     // Kirora refused the token: get a fresh one, once, and try again with it.
     const freshToken = await this.identity.refresh(user, sentToken);
     if (freshToken) {
       const retried = await this.send(this.apiUrl, method, path, freshToken, options);
-      if (retried !== REFUSED) return this.accepted(user, retried as Data | undefined);
+      if (retried !== REFUSED) {
+        return this.accepted(user, retried as Data | undefined);
+      }
     }
     throw refusal();
   }
@@ -119,43 +131,27 @@ export class ClientApi {
     userToken: string,
     options: RequestOptions,
   ): Promise<unknown> {
-    const hasBody = options.body !== undefined;
-    // AbortSignal.timeout() and AbortSignal.any() are newer than the browsers we support.
+    // AbortSignal.timeout() and AbortSignal.any() are newer than the browsers we support,
+    // so the caller's signal is linked to one of our own, which the timeout also ends.
     const abort = new AbortController();
     const cancel = () => abort.abort();
-    if (options.signal?.aborted) cancel();
+    if (options.signal?.aborted) {
+      cancel();
+    }
     options.signal?.addEventListener('abort', cancel);
+
+    const url = `${apiUrl}/client/v1${path}`;
     const request: RequestInit = {
       method,
-      headers: {
-        authorization: `Bearer ${userToken}`,
-        'kirora-client-key': this.clientKey,
-        'kirora-sdk': SDK_NAME,
-        ...(hasBody ? { 'content-type': 'application/json' } : {}),
-      },
-      body: hasBody ? JSON.stringify(options.body) : undefined,
+      headers: this.headers(userToken, options.body !== undefined),
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: abort.signal,
     };
     const exchange = async () => {
-      const call = (keepalive?: boolean) =>
-        fetch(`${apiUrl}/client/v1${path}`, { ...request, keepalive });
-      // Chrome 80 refuses keepalive for a request needing a CORS preflight, as ours do:
-      // tried again without, which still goes if the page is only hidden, not closing.
-      const response = await call(options.keepalive).catch((error: unknown) => {
-        if (!options.keepalive || abort.signal.aborted) throw error;
-        return call();
-      });
-      if (response.status === 401) {
-        // Not read, so let the connection go.
-        response.body?.cancel().catch(() => undefined);
-        return REFUSED;
-      }
-      if (!response.ok) throw await toApiError(response);
-      const delayMs = retryAfterMs(response.headers.get('retry-after'));
-      if (delayMs) options.onRetryAfter?.(delayMs);
-      if (response.status === 204) return undefined;
-      return ((await response.json()) as { data: unknown }).data;
+      const response = await fetchWithKeepalive(url, request, options.keepalive === true);
+      return readAnswer(response, options);
     };
+
     try {
       return await withTimeout(exchange(), options.timeoutMs ?? REQUEST_TIMEOUT_MS);
     } catch (error) {
@@ -167,6 +163,66 @@ export class ClientApi {
       options.signal?.removeEventListener('abort', cancel);
     }
   }
+
+  private headers(userToken: string, hasBody: boolean): Record<string, string> {
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${userToken}`,
+      'kirora-client-key': this.clientKey,
+      'kirora-sdk': SDK_NAME,
+    };
+    if (hasBody) {
+      headers['content-type'] = 'application/json';
+    }
+    return headers;
+  }
+}
+
+/**
+ * Fetches `request`, with `keepalive` if asked. Chrome 80 refuses keepalive for a request
+ * needing a CORS preflight, as ours do: tried again without, which still goes if the page
+ * is only hidden.
+ */
+async function fetchWithKeepalive(
+  url: string,
+  request: RequestInit,
+  keepalive: boolean,
+): Promise<Response> {
+  if (!keepalive) {
+    return fetch(url, request);
+  }
+  try {
+    return await fetch(url, { ...request, keepalive: true });
+  } catch (error) {
+    if (request.signal?.aborted) {
+      throw error;
+    }
+    return fetch(url, request);
+  }
+}
+
+/**
+ * Kirora's answer: its `data`, `REFUSED` for a 401 (so the caller can refresh the token),
+ * or a `KiroraApiError`. A successful answer's `Retry-After` goes to `onRetryAfter`.
+ */
+async function readAnswer(response: Response, options: RequestOptions): Promise<unknown> {
+  if (response.status === 401) {
+    // Not read, so let the connection go.
+    response.body?.cancel().catch(() => undefined);
+    return REFUSED;
+  }
+  if (!response.ok) {
+    throw await toApiError(response);
+  }
+
+  const delayMs = retryAfterMs(response.headers.get('retry-after'));
+  if (delayMs) {
+    options.onRetryAfter?.(delayMs);
+  }
+
+  if (response.status === 204) {
+    return undefined;
+  }
+  return ((await response.json()) as { data: unknown }).data;
 }
 
 /** A 401, as the caller sees it once a fresh token can't help. */
@@ -187,6 +243,8 @@ async function toApiError(response: Response): Promise<KiroraApiError> {
     retryAfterMs(response.headers.get('retry-after')),
   );
   const errors = body?.error?.errors;
-  if (Array.isArray(errors)) fieldErrors.set(error, errors as FieldError[]);
+  if (Array.isArray(errors)) {
+    fieldErrors.set(error, errors as FieldError[]);
+  }
   return error;
 }

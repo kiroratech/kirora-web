@@ -144,7 +144,9 @@ it('asks for a fresh token as the page is shown again past the refresh time', as
     cookie: '',
     querySelector: () => null,
     addEventListener: (type: string, listener: () => void) => {
-      if (type === 'visibilitychange') listeners.push(listener);
+      if (type === 'visibilitychange') {
+        listeners.push(listener);
+      }
     },
     removeEventListener: () => undefined,
   };
@@ -163,10 +165,14 @@ it('asks for a fresh token as the page is shown again past the refresh time', as
 
   // The tab was hidden while its timer was held back, and comes back past it.
   page.visibilityState = 'hidden';
-  for (const listener of listeners) listener();
+  for (const listener of listeners) {
+    listener();
+  }
   vi.spyOn(Date, 'now').mockReturnValue((now + 590) * 1000);
   page.visibilityState = 'visible';
-  for (const listener of listeners) listener();
+  for (const listener of listeners) {
+    listener();
+  }
   expect(fetchUserToken).toHaveBeenCalledTimes(1);
   vi.restoreAllMocks();
   kirora.destroy();
@@ -269,7 +275,9 @@ it("doesn't tell the app of a failure once someone else has signed in", async ()
   await vi.waitFor(() => expect(answer).not.toBeUndefined());
   answer(new Response(null, { status: 401 }));
   // Bob signs in after Alice's failure is found, before the app is told of it.
-  for (let i = 0; i < 50; i++) await Promise.resolve();
+  for (let i = 0; i < 50; i++) {
+    await Promise.resolve();
+  }
   await kirora.identify('bob-token');
   await tick();
   expect(failures).toEqual([]);

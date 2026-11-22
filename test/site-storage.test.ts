@@ -19,9 +19,14 @@ function browserOn(host: string) {
       const attribute = (key: string) =>
         attributes.find((part) => part.startsWith(`${key}=`))?.slice(key.length + 1);
       const domain = attribute('domain');
-      if (domain === 'com' || (domain && !`.${host}`.endsWith(`.${domain}`))) return;
-      if (attribute('max-age') === '0') jar.delete(name);
-      else jar.set(name, { value, domain });
+      if (domain === 'com' || (domain && !`.${host}`.endsWith(`.${domain}`))) {
+        return;
+      }
+      if (attribute('max-age') === '0') {
+        jar.delete(name);
+      } else {
+        jar.set(name, { value, domain });
+      }
     },
   };
   vi.stubGlobal('document', document);

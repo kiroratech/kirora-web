@@ -63,14 +63,18 @@ function kiroraPush(event: PushEvent): KiroraPush | undefined {
   } catch {
     return undefined;
   }
-  if (typeof payload !== 'object' || payload === null) return undefined;
+  if (typeof payload !== 'object' || payload === null) {
+    return undefined;
+  }
   const push = payload as KiroraPush;
   return push.kirora === 'true' ? push : undefined;
 }
 
 self.addEventListener('push', (event) => {
   const push = kiroraPush(event);
-  if (!push) return;
+  if (!push) {
+    return;
+  }
   // Only well-formed buttons: one without a title would stop the push from showing.
   const buttons = Array.isArray(push.buttons)
     ? push.buttons.filter((button) => typeof button?.title === 'string')
@@ -108,32 +112,45 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   const data = (event.notification.data as Partial<NotificationData> | null)?.kirora;
-  if (!data) return;
+  if (!data) {
+    return;
+  }
   event.notification.close();
+
   // Buttons open their own URL, the body opens actionUrl. Opening a URL counts as a
   // click, otherwise it's an open.
   const url = event.action ? data.buttons[Number(event.action)]?.url : data.actionUrl;
-  const reported = data.trackingUrl
-    ? report(data.trackingUrl, url ? 'clicked' : 'opened')
-    : Promise.resolve();
+  let reported = Promise.resolve();
+  if (data.trackingUrl) {
+    reported = report(data.trackingUrl, url ? 'clicked' : 'opened');
+  }
+
   const tap: TapMessage = {
     kirora: 'notificationClick',
     id: `${Date.now()}-${Math.random()}`,
     data: data.data ?? {},
   };
-  // The window opens at once, while the browser still allows it (Firefox: one second);
-  // the page hears of the tap after its report.
-  event.waitUntil(
-    Promise.all([
-      reported,
-      showSite(url)
-        .then(([client, opened]) =>
-          client ? tellPage(client, tap, reported, opened) : undefined,
-        )
-        .catch(() => undefined),
-    ]),
-  );
+  event.waitUntil(Promise.all([reported, showAndTell(url, tap, reported)]));
 });
+
+/**
+ * Opens the window at once, while the browser still allows it (Firefox: one second), and
+ * tells the page of the tap after its report. Never rejects.
+ */
+async function showAndTell(
+  url: string | undefined,
+  tap: TapMessage,
+  reported: Promise<void>,
+): Promise<void> {
+  try {
+    const { client, opened } = await showSite(url);
+    if (client) {
+      await tellPage(client, tap, reported, opened);
+    }
+  } catch {
+    // The window couldn't be opened or reached: nothing more to do.
+  }
+}
 
 /**
  * Opens the tapped link, or with none, brings the site forward: an open tab of it, or its
@@ -142,13 +159,21 @@ self.addEventListener('notificationclick', (event) => {
  */
 async function showSite(
   url: string | undefined,
-): Promise<[WindowClient | null, boolean]> {
-  const tabs = url
-    ? []
-    : await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  const tab = tabs.find((client) => client.focused) ?? tabs[0];
-  if (tab) return [await tab.focus().catch(() => tab), false];
-  return [await self.clients.openWindow(url ?? self.registration.scope), true];
+): Promise<{ client: WindowClient | null; opened: boolean }> {
+  if (!url) {
+    const tabs = await self.clients.matchAll({
+      type: 'window',
+      includeUncontrolled: true,
+    });
+    const tab = tabs.find((client) => client.focused) ?? tabs[0];
+    if (tab) {
+      const focused = await tab.focus().catch(() => tab);
+      return { client: focused, opened: false };
+    }
+  }
+
+  const client = await self.clients.openWindow(url ?? self.registration.scope);
+  return { client, opened: true };
 }
 
 /**
@@ -165,30 +190,52 @@ async function tellPage(
   // Not settledBy() from utils: it would bring its timeout error into the worker.
   await Promise.race([reported, wait(TAP_REPORT_WAIT_MS)]);
   client.postMessage(tap);
-  if (!opened) return;
-  let held: HeldTap | undefined;
-  await Promise.race([
-    new Promise<void>((claimed) => {
-      heldTaps.add((held = { tap, client: client.id, claimed }));
-      // The oldest stops waiting, and leaves at once, so the next add doesn't count it.
-      if (heldTaps.size > MAX_HELD_TAPS) {
-        const oldest = heldTaps.values().next().value!;
-        heldTaps.delete(oldest);
-        oldest.claimed();
-      }
-    }),
-    wait(TAP_CLAIM_WAIT_MS),
-  ]);
-  heldTaps.delete(held!);
+  if (!opened) {
+    return;
+  }
+
+  let claimed = () => {};
+  const claim = new Promise<void>((resolve) => {
+    claimed = resolve;
+  });
+  const held: HeldTap = { tap, client: client.id, claimed };
+  holdTap(held);
+
+  await Promise.race([claim, wait(TAP_CLAIM_WAIT_MS)]);
+  heldTaps.delete(held);
+}
+
+/**
+ * Holds `held` for its page to claim. Past the limit, the oldest stops waiting and
+ * leaves at once, so the next one held doesn't count it.
+ */
+function holdTap(held: HeldTap): void {
+  heldTaps.add(held);
+  if (heldTaps.size <= MAX_HELD_TAPS) {
+    return;
+  }
+
+  // A set keeps the order things were added in: the first is the oldest.
+  const [oldest] = heldTaps;
+  if (oldest) {
+    heldTaps.delete(oldest);
+    oldest.claimed();
+  }
 }
 
 // The page's SDK asks for a tap held for it, once it listens.
 self.addEventListener('message', (event) => {
   const source = event.source;
-  if ((event.data as { kirora?: unknown } | null)?.kirora !== 'listening') return;
-  if (!source || !('id' in source)) return;
+  if ((event.data as { kirora?: unknown } | null)?.kirora !== 'listening') {
+    return;
+  }
+  if (!source || !('id' in source)) {
+    return;
+  }
   for (const held of heldTaps) {
-    if (held.client !== source.id) continue;
+    if (held.client !== source.id) {
+      continue;
+    }
     // Claimed, it stops waiting and leaves heldTaps before another event can come.
     source.postMessage(held.tap);
     held.claimed();
@@ -205,7 +252,9 @@ async function report(
   trackingUrl: string,
   event: 'delivered' | 'opened' | 'clicked',
 ): Promise<void> {
-  if (!(await isKirorasUrl(trackingUrl))) return;
+  if (!(await isKirorasUrl(trackingUrl))) {
+    return;
+  }
   const send = () =>
     fetch(trackingUrl, {
       method: 'POST',
@@ -216,7 +265,9 @@ async function report(
       (response) => response.status < 500 && response.status !== 429,
       () => false,
     );
-  if (!(await send())) await send();
+  if (!(await send())) {
+    await send();
+  }
 }
 
 /**
@@ -249,33 +300,32 @@ const MAX_RETRY_WAIT_MS = 60_000;
  * as the worker has no user token. A device signed out or denied meanwhile stays off.
  */
 async function moveSubscription(event: PushSubscriptionChangeEvent): Promise<void> {
-  const { scope, pushManager } = self.registration;
+  const { scope } = self.registration;
   const saved = await readSubscription(scope);
-  // Another service's subscription changed, or this browser never registered with Kirora
-  // (or no longer is: a 404 or 409 below kept only the API address).
-  if (
-    !saved?.subscription.endpoint ||
-    (event.oldSubscription &&
-      event.oldSubscription.endpoint !== saved.subscription.endpoint)
-  ) {
+
+  // This browser never registered with Kirora, or no longer is (a 404 or 409 below kept
+  // only the API address).
+  const registered = saved?.subscription;
+  if (!saved || !registered?.endpoint) {
     return;
   }
-  // Rejects if permission was taken away: then there's nothing to move to.
-  const replacement =
-    event.newSubscription ??
-    (await pushManager.getSubscription()) ??
-    (await pushManager.subscribe({
-      userVisibleOnly: true,
-      // As bytes: not every supported browser takes the base64 string.
-      applicationServerKey: base64UrlBytes(saved.vapidPublicKey),
-    }));
-  const newSubscription = replacement.toJSON();
-  if (newSubscription.endpoint === saved.subscription.endpoint) return;
+
+  // Another service's subscription changed.
+  if (event.oldSubscription && event.oldSubscription.endpoint !== registered.endpoint) {
+    return;
+  }
+
+  const newSubscription = (await replacementFor(event, saved)).toJSON();
+  if (newSubscription.endpoint === registered.endpoint) {
+    return;
+  }
+
   const body = JSON.stringify({
     pushAppId: saved.pushAppId,
-    oldSubscription: saved.subscription,
+    oldSubscription: registered,
     newSubscription,
   });
+
   for (let attempt = 1; ; attempt++) {
     const response = await fetch(saved.url, {
       method: 'POST',
@@ -286,25 +336,62 @@ async function moveSubscription(event: PushSubscriptionChangeEvent): Promise<voi
       },
       body,
     }).catch(() => undefined);
-    const status = response?.status ?? 0;
+    const status = response ? response.status : 0;
+
     if (status === 204) {
-      const moved: SavedSubscription = { ...saved, subscription: newSubscription };
-      return void (await saveSubscription(scope, moved));
+      await saveSubscription(scope, { ...saved, subscription: newSubscription });
+      return;
     }
+
     // 404: no device has the old subscription. 409: another device has the new one.
     // The API address stays, as tracking URLs are checked against it.
     if (status === 404 || status === 409) {
-      return void (await saveSubscription(scope, { ...saved, subscription: {} }));
+      const addressOnly: SavedSubscription = { ...saved };
+      delete addressOnly.subscription;
+      await saveSubscription(scope, addressOnly);
+      return;
     }
+
     const retry = status === 0 || status === 429 || status >= 500;
-    if (!retry || attempt === MOVE_ATTEMPTS) return;
+    if (!retry || attempt === MOVE_ATTEMPTS) {
+      return;
+    }
+
     // Never sooner than Retry-After (seconds or a date), nor than the backoff. A longer
     // wait than the worker can be kept for ends it, rather than retrying early.
-    const delay = Math.max(
-      retryAfterMs(response?.headers.get('retry-after') ?? null) ?? 0,
-      1000 * 2 ** attempt,
-    );
-    if (delay > MAX_RETRY_WAIT_MS) return;
+    const retryAfter = response
+      ? retryAfterMs(response.headers.get('retry-after'))
+      : undefined;
+    const delay = Math.max(retryAfter ?? 0, 1000 * 2 ** attempt);
+    if (delay > MAX_RETRY_WAIT_MS) {
+      return;
+    }
     await wait(delay);
   }
+}
+
+/**
+ * The subscription that replaced the registered one: the event's, the browser's current
+ * one, or a new one made with the saved key. Rejects if permission was taken away: then
+ * there's nothing to move to.
+ */
+async function replacementFor(
+  event: PushSubscriptionChangeEvent,
+  saved: SavedSubscription,
+): Promise<PushSubscription> {
+  if (event.newSubscription) {
+    return event.newSubscription;
+  }
+
+  const { pushManager } = self.registration;
+  const current = await pushManager.getSubscription();
+  if (current) {
+    return current;
+  }
+
+  return pushManager.subscribe({
+    userVisibleOnly: true,
+    // As bytes: not every supported browser takes the base64 string.
+    applicationServerKey: base64UrlBytes(saved.vapidPublicKey),
+  });
 }

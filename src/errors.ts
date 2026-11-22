@@ -5,7 +5,9 @@ export class KiroraError extends Error {
     super(`Kirora: ${message}`, options);
     this.name = 'KiroraError';
     // Chrome 93, Firefox 91 and Safari 15 are the first to take `cause` from options.
-    if (options) this.cause = options.cause;
+    if (options) {
+      this.cause = options.cause;
+    }
   }
 }
 
@@ -14,7 +16,9 @@ export class KiroraError extends Error {
  * else as a `KiroraError` caused by it, its message after `prefix`.
  */
 export function asKiroraError(error: unknown, prefix = ''): KiroraError {
-  if (error instanceof KiroraError) return error;
+  if (error instanceof KiroraError) {
+    return error;
+  }
   const reason = error instanceof Error ? error.message : String(error);
   return new KiroraError(prefix + reason, { cause: error });
 }
@@ -45,6 +49,23 @@ export class KiroraApiError extends KiroraError {
   get retryable(): boolean {
     return [408, 425, 429].includes(this.status) || this.status >= 500;
   }
+}
+
+/** @internal How long Kirora asked to be left alone (`Retry-After`), or 0. */
+export function retryAfterOf(error: unknown): number {
+  if (error instanceof KiroraApiError && error.retryAfterMs) {
+    return error.retryAfterMs;
+  }
+  return 0;
+}
+
+/**
+ * @internal A 404 or 409: Kirora's final word on a device change, not a failure to retry.
+ */
+export function isSettledRefusal(error: unknown): boolean {
+  return (
+    error instanceof KiroraApiError && (error.status === 404 || error.status === 409)
+  );
 }
 
 /** @internal What a refusal says was wrong in the request, by part and dotted field. */

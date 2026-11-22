@@ -67,7 +67,9 @@ function stubPage({
     page,
     setTitle: (newTitle: string) => {
       page.title = newTitle;
-      for (const notify of [...observers]) notify();
+      for (const notify of [...observers]) {
+        notify();
+      }
     },
   };
 }
@@ -188,7 +190,9 @@ function navigatingApp({ emptying }: { emptying: boolean }) {
   return {
     navigate(path: string) {
       vi.stubGlobal('location', new URL(path, 'https://example.com'));
-      if (emptying) page.title = '';
+      if (emptying) {
+        page.title = '';
+      }
       history.pushState(null, '', path);
     },
     setTitle,

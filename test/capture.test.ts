@@ -217,7 +217,9 @@ it('retries events refused for a passing reason or answered twice or unreadably'
     answers.push(
       Object.fromEntries(events.map((event) => [event.name, String(attempt)])),
     );
-    if (attempt > 1) return Promise.resolve(accepted({ events }));
+    if (attempt > 1) {
+      return Promise.resolve(accepted({ events }));
+    }
     const key = (name: string) =>
       events.find((event) => event.name === name)!.idempotencyKey;
     return Promise.resolve(
@@ -249,7 +251,9 @@ it('retries events refused for a passing reason or answered twice or unreadably'
     'Null',
     'Empty',
   ];
-  for (const name of names) kirora.track(name);
+  for (const name of names) {
+    kirora.track(name);
+  }
   await kirora.identify(tokenFor('ada'));
   await kirora.flush();
   await kirora.flush();

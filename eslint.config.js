@@ -15,6 +15,10 @@ export default tseslint.config(
     ...tseslint.configs.disableTypeChecked,
   },
   {
+    // Every if, else and loop body in braces, so what a condition covers is plain to see.
+    rules: { curly: ['error', 'all'] },
+  },
+  {
     // Keeps the SDK consistent as it grows.
     files: ['src/**/*.ts'],
     rules: {

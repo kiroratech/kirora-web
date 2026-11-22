@@ -31,7 +31,9 @@ export function deviceStorage(onFallback: (error: unknown) => void): DeviceStora
   let persistent = storage !== undefined;
   let readable = storage !== undefined;
   const fallBack = (error: unknown) => {
-    if (!persistent) return;
+    if (!persistent) {
+      return;
+    }
     persistent = false;
     onFallback(error);
   };
@@ -43,7 +45,9 @@ export function deviceStorage(onFallback: (error: unknown) => void): DeviceStora
       return readable;
     },
     getItem: (key) => {
-      if (memory.has(key)) return memory.get(key) ?? null;
+      if (memory.has(key)) {
+        return memory.get(key) ?? null;
+      }
       try {
         return storage?.getItem(key) ?? null;
       } catch (error) {
@@ -71,7 +75,9 @@ export function deviceStorage(onFallback: (error: unknown) => void): DeviceStora
       }
       // Memory is only used once we've fallen back. Hides a value still stored, or one
       // that couldn't be removed, so reads match what was asked.
-      if (!persistent) memory.set(key, null);
+      if (!persistent) {
+        memory.set(key, null);
+      }
     },
   };
 }

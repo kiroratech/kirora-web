@@ -18,7 +18,9 @@ it('makes events from before sign-in the first user’s, never the next one’s'
   const sent: [string | undefined, string][] = [];
   vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
     const user = userOf(init);
-    if (user === 'ada') return Promise.resolve(new Response(null, { status: 503 }));
+    if (user === 'ada') {
+      return Promise.resolve(new Response(null, { status: 503 }));
+    }
     const batch = JSON.parse(String(init.body)) as { events: SentEvent[] };
     sent.push(
       ...batch.events.map((event): [string | undefined, string] => [user, event.name]),
@@ -141,7 +143,9 @@ it('gives back the events a sign-in adopted when Kirora refuses its token', asyn
   const sent: [string | undefined, string][] = [];
   vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
     const user = userOf(init);
-    if (user === 'mallory') return Promise.resolve(new Response(null, { status: 401 }));
+    if (user === 'mallory') {
+      return Promise.resolve(new Response(null, { status: 401 }));
+    }
     const batch = JSON.parse(String(init.body)) as { events: SentEvent[] };
     sent.push(
       ...batch.events.map((event): [string | undefined, string] => [user, event.name]),

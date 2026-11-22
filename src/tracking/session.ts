@@ -26,10 +26,25 @@ type Sessions = Record<string, StoredSession>;
 /** The sessions, in shared storage under `key`, which names the workspace. */
 export type SessionStore = { storage: KeyValueStorage; key: string };
 
+/**
+ * The session activity was recorded on: whether it just `started`, and `borrowedFrom`,
+ * the user whose session activity before sign-in continued.
+ */
+export type TouchedSession = {
+  sessionId: string;
+  started: boolean;
+  borrowedFrom?: string;
+};
+
 /** Ends `owner`'s session, or with no owner given, every session. */
 export function endSession(store: SessionStore, owner?: string): void {
-  const sessions = owner === undefined ? {} : liveSessions(store);
-  if (owner !== undefined) delete sessions[sessionOwner(owner)];
+  if (owner === undefined) {
+    store.storage.removeItem(store.key);
+    return;
+  }
+
+  const sessions = liveSessions(store);
+  delete sessions[sessionOwner(owner)];
   save(store, sessions);
 }
 
@@ -40,30 +55,31 @@ export function endSession(store: SessionStore, owner?: string): void {
  * session is `borrowedFrom` that user, so it's left out of the events if someone else
  * adopts them. A session begun before sign-in becomes the user's who signs in.
  */
-export function touchSession(
-  store: SessionStore,
-  owner: string | null,
-): { sessionId: string; started: boolean; borrowedFrom?: string } {
+export function touchSession(store: SessionStore, owner: string | null): TouchedSession {
   const sessions = liveSessions(store);
+
   let key: string;
   if (owner === null) {
     key = latest(sessions) ?? NO_ONE;
   } else {
     key = sessionOwner(owner);
+    // The visit begun before sign-in is theirs now.
     if (!sessions[key] && sessions[NO_ONE]) {
       sessions[key] = sessions[NO_ONE];
       delete sessions[NO_ONE];
     }
   }
+
   const current = sessions[key];
-  const sessionId = current?.sessionId ?? uuid();
+  const sessionId = current ? current.sessionId : uuid();
   sessions[key] = { sessionId, lastActivityAt: Date.now() };
   save(store, sessions);
-  return {
-    sessionId,
-    started: !current,
-    ...(owner === null && key !== NO_ONE ? { borrowedFrom: key } : {}),
-  };
+
+  const touched: TouchedSession = { sessionId, started: !current };
+  if (owner === null && key !== NO_ONE) {
+    touched.borrowedFrom = key;
+  }
+  return touched;
 }
 
 /**
@@ -73,24 +89,32 @@ export function touchSession(
 export function keepSessionAlive(store: SessionStore, owner: string | null): void {
   const sessions = liveSessions(store);
   const key = owner === null ? latest(sessions) : sessionOwner(owner);
-  const current = key === undefined ? undefined : sessions[key];
-  if (!current) return;
-  current.lastActivityAt = Date.now();
+  if (key === undefined || !sessions[key]) {
+    return;
+  }
+
+  sessions[key].lastActivityAt = Date.now();
   save(store, sessions);
 }
 
 /** Saves the newest `MAX_SESSIONS` of `sessions`, or removes them all if there are none. */
 function save({ storage, key }: SessionStore, sessions: Sessions): void {
   const kept = Object.entries(sessions).sort(newestFirst).slice(0, MAX_SESSIONS);
-  if (kept.length === 0) storage.removeItem(key);
-  else storage.setItem(key, JSON.stringify(Object.fromEntries(kept)));
+  if (kept.length === 0) {
+    storage.removeItem(key);
+  } else {
+    storage.setItem(key, JSON.stringify(Object.fromEntries(kept)));
+  }
 }
 
 /** The sessions that haven't timed out; none if unreadable. */
 function liveSessions({ storage, key }: SessionStore): Sessions {
   const stored = readJson(storage, key);
   const live: Sessions = {};
-  if (typeof stored !== 'object' || stored === null) return live;
+  if (typeof stored !== 'object' || stored === null) {
+    return live;
+  }
+
   for (const [owner, session] of Object.entries(stored as Record<string, unknown>)) {
     const { sessionId, lastActivityAt } = (session ?? {}) as Partial<StoredSession>;
     if (
@@ -106,7 +130,8 @@ function liveSessions({ storage, key }: SessionStore): Sessions {
 
 /** Whose session was active last, if any is live. */
 function latest(sessions: Sessions): string | undefined {
-  return Object.entries(sessions).sort(newestFirst)[0]?.[0];
+  const [newest] = Object.entries(sessions).sort(newestFirst);
+  return newest ? newest[0] : undefined;
 }
 
 function newestFirst(

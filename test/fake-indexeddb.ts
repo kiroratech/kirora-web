@@ -24,7 +24,9 @@ export function stubIndexedDB(): Map<string, Map<string, unknown>> {
       const finished = new Promise<void>((resolve) => (finish = resolve));
       // A read-write transaction waits for the one made before it.
       const ready = mode === 'readwrite' ? lastReadWrite : Promise.resolve();
-      if (mode === 'readwrite') lastReadWrite = finished;
+      if (mode === 'readwrite') {
+        lastReadWrite = finished;
+      }
       const request = (run: () => unknown): Request => {
         const pending: Request = { result: undefined };
         void ready.then(() => {

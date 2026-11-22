@@ -58,6 +58,9 @@ export type SignedInUser = {
  *
  * The token is kept in memory only.
  */
+/** A sign-in identify() is still finishing, and a token failure held back meanwhile. */
+type SignInUnderWay = { user: SignedInUser; held?: AuthenticationFailureReason };
+
 export class Identity {
   private signedIn: SignedInUser | null = null;
   /** Counts signIn() and end() calls, so only the latest sets the user. */
@@ -76,8 +79,8 @@ export class Identity {
    * The user identify() is still signing in, and a token failure held back meanwhile:
    * if identify() rejects for it, the app hears of it there, so it's reported once.
    */
-  private identifying: { user: SignedInUser; held?: AuthenticationFailureReason } | null =
-    null;
+  private identifying: SignInUnderWay | null = null;
+
   constructor(
     private readonly fetchUserToken: KiroraOptions['fetchUserToken'],
     private readonly onFailed?: (reason: AuthenticationFailureReason) => void,
@@ -112,23 +115,42 @@ export class Identity {
     onSignedIn: () => Promise<void>,
   ): Promise<void> {
     const call = ++this.calls;
-    await (this.signingIn = (async () => {
-      const userToken = token ?? (await this.fetchToken());
-      if (call !== this.calls) return;
-      this.setUser(userToken);
-      const identifying: NonNullable<Identity['identifying']> = { user: this.signedIn! };
-      this.identifying = identifying;
-      try {
-        await onSignedIn();
-      } catch (error) {
-        // identify() rejects for the token: that's the app's one report of it.
-        this.failureReported = identifying.user;
-        throw error;
-      } finally {
-        if (this.identifying === identifying) this.identifying = null;
+    this.signingIn = this.completeSignIn(call, token, onSignedIn);
+    await this.signingIn;
+  }
+
+  /** The rest of signIn() number `call`, which `settled()` waits for. */
+  private async completeSignIn(
+    call: number,
+    token: string | undefined,
+    onSignedIn: () => Promise<void>,
+  ): Promise<void> {
+    const userToken = token ?? (await this.fetchToken());
+    // A later signIn() or signOut() decided who's signed in meanwhile.
+    if (call !== this.calls) {
+      return;
+    }
+
+    const user = signedInUser(userToken);
+    this.setUser(user);
+    const identifying: SignInUnderWay = { user };
+    this.identifying = identifying;
+
+    try {
+      await onSignedIn();
+    } catch (error) {
+      // identify() rejects for the token: that's the app's one report of it.
+      this.failureReported = user;
+      throw error;
+    } finally {
+      if (this.identifying === identifying) {
+        this.identifying = null;
       }
-      if (identifying.held) this.authFailed(identifying.user, identifying.held);
-    })());
+    }
+
+    if (identifying.held) {
+      this.authFailed(user, identifying.held);
+    }
   }
 
   /**
@@ -136,7 +158,9 @@ export class Identity {
    * going: it's newer, so it wins. True if `user` was signed out.
    */
   signOut(user: SignedInUser): boolean {
-    if (this.signedIn !== user) return false;
+    if (this.signedIn !== user) {
+      return false;
+    }
     this.setUser(null);
     return true;
   }
@@ -152,7 +176,9 @@ export class Identity {
    * it hasn't been told since their token was last accepted or identify() was called.
    */
   authFailed(user: SignedInUser, reason: AuthenticationFailureReason): void {
-    if (this.owner !== user || this.failureReported === user) return;
+    if (this.owner !== user || this.failureReported === user) {
+      return;
+    }
     if (this.identifying?.user === user) {
       this.identifying.held ??= reason;
       return;
@@ -161,7 +187,9 @@ export class Identity {
     // Apart from the SDK's own work, and only if it still stands then: another sign-in,
     // logout(), destroy() or an accepted token may have come first.
     setTimeout(() => {
-      if (this.owner === user && this.failureReported === user) this.onFailed?.(reason);
+      if (this.owner === user && this.failureReported === user) {
+        this.onFailed?.(reason);
+      }
     });
   }
 
@@ -170,13 +198,17 @@ export class Identity {
    * token it's about to replace (e.g. as the page is shown again). Never rejects.
    */
   async tokenReady(user: SignedInUser): Promise<void> {
-    if (this.signedIn === user) await this.pendingRefresh?.catch(() => undefined);
+    if (this.signedIn === user) {
+      await this.pendingRefresh?.catch(() => undefined);
+    }
   }
 
   /** Kirora accepted `user`'s token: a later failure is news again. */
   tokenAccepted(user: SignedInUser): void {
     this.accepted = user;
-    if (this.failureReported === user) this.failureReported = null;
+    if (this.failureReported === user) {
+      this.failureReported = null;
+    }
   }
 
   /** logout() is signing `user` out: a failure on the way out isn't the app's to hear. */
@@ -195,9 +227,13 @@ export class Identity {
    */
   refreshIfDue(): void {
     const user = this.signedIn;
-    if (!user || !this.fetchUserToken) return;
+    if (!user || !this.fetchUserToken) {
+      return;
+    }
     const { expiresAt } = user;
-    if (expiresAt === undefined) return;
+    if (expiresAt === undefined) {
+      return;
+    }
     if (Date.now() < expiresAt - REFRESH_AHEAD_MS) {
       this.setTimer(expiresAt - REFRESH_AHEAD_MS);
       return;
@@ -250,33 +286,47 @@ export class Identity {
       user.refused = true;
       return null;
     }
-    if (this.user !== user) return null;
-    if (user.token !== refusedToken) return user.token;
-    const refresh = (this.pendingRefresh ??= this.fetchToken());
+    if (this.signedIn !== user) {
+      return null;
+    }
+    if (user.token !== refusedToken) {
+      return user.token;
+    }
+
+    this.pendingRefresh ??= this.fetchToken();
+    const refresh = this.pendingRefresh;
     try {
       const userToken = await refresh;
+      if (this.signedIn !== user) {
+        return null;
+      }
       // Only a token naming the same user: one naming no one can't be told apart from
       // another user's.
       const subject = subjectOf(userToken);
-      if (this.user !== user || subject === null || subject !== user.tokenSubject) {
+      if (subject === null || subject !== user.tokenSubject) {
         return null;
       }
+
       user.token = userToken;
       user.expiresAt = expiresAtOf(userToken, true);
       // Sets the next refresh, a minute before it expires.
       this.setTimer(0);
       return userToken;
     } finally {
-      if (this.pendingRefresh === refresh) this.pendingRefresh = null;
+      if (this.pendingRefresh === refresh) {
+        this.pendingRefresh = null;
+      }
     }
   }
 
-  private setUser(userToken: string | null): void {
-    this.signedIn = userToken === null ? null : signedInUser(userToken);
+  private setUser(user: SignedInUser | null): void {
+    this.signedIn = user;
     this.pendingRefresh = null;
     clearTimeout(this.refreshTimer);
     // Sets the first refresh, a minute before the token expires.
-    if (this.signedIn) this.setTimer(0);
+    if (this.signedIn) {
+      this.setTimer(0);
+    }
   }
 
   /**
@@ -335,7 +385,9 @@ function signedInUser(token: string): SignedInUser {
 function claimsOf(userToken: string): { sub?: unknown; exp?: unknown; iat?: unknown } {
   try {
     const claims = userToken.split('.')[1];
-    if (!claims) return {};
+    if (!claims) {
+      return {};
+    }
     const parsed = JSON.parse(base64UrlDecode(claims)) as unknown;
     return typeof parsed === 'object' && parsed !== null ? parsed : {};
   } catch {
@@ -349,25 +401,40 @@ function subjectOf(userToken: string): string | null {
 }
 
 /**
- * When `userToken`, just arrived, stops working (epoch ms): at its `exp`. One already past
- * it as it arrives, or issued in the future, meets a device clock that's off, so its
- * lifetime (`exp` less `iat`) is counted from now instead. Undefined if that can't be told, or for one a refresh just
- * gave that's due at once: asking again would get the same, so it's replaced once Kirora
- * refuses it. Either way it waits for a refusal.
+ * When `userToken`, just arrived, stops working (epoch ms): at its `exp`.
+ *
+ * One already past it as it arrives, or issued in the future, meets a device clock that's
+ * off, so its lifetime (`exp` less `iat`) is counted from now instead.
+ *
+ * Undefined if that can't be told, or for one a refresh just gave that's due at once:
+ * asking again would get the same, so it's replaced once Kirora refuses it. Either way it
+ * waits for a refusal.
  */
 function expiresAtOf(userToken: string, refreshed: boolean): number | undefined {
   const { exp, iat } = claimsOf(userToken);
-  if (!isTime(exp)) return undefined;
+  if (!isTime(exp)) {
+    return undefined;
+  }
+
   const now = Date.now();
   let expiresAt = exp * 1000;
-  // Issued in the future (by more than a refresh's lead): the device clock is behind.
-  // Already expired as it arrives: the clock may be ahead. Either way the token's
-  // lifetime is counted from now instead, if `iat` says what it is.
-  if (expiresAt <= now || (isTime(iat) && iat * 1000 > now + REFRESH_AHEAD_MS)) {
-    if (!isTime(iat)) return undefined;
+
+  // Already expired as it arrives: the clock may be ahead. Issued in the future (by more
+  // than a refresh's lead): the clock is behind.
+  const expiredOnArrival = expiresAt <= now;
+  const issuedInFuture = isTime(iat) && iat * 1000 > now + REFRESH_AHEAD_MS;
+  if (expiredOnArrival || issuedInFuture) {
+    if (!isTime(iat)) {
+      return undefined;
+    }
     expiresAt = now + (exp - iat) * 1000;
   }
-  return refreshed && expiresAt - REFRESH_AHEAD_MS <= now ? undefined : expiresAt;
+
+  const dueAtOnce = expiresAt - REFRESH_AHEAD_MS <= now;
+  if (refreshed && dueAtOnce) {
+    return undefined;
+  }
+  return expiresAt;
 }
 
 function isTime(claim: unknown): claim is number {

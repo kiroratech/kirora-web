@@ -685,7 +685,9 @@ it('detaches with the lastSeenAt of a registration still under way at logout', a
   const deletes: string[] = [];
   const kiroraFetch = globalThis.fetch;
   vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
-    if (init.method === 'DELETE') deletes.push(new URL(url).search);
+    if (init.method === 'DELETE') {
+      deletes.push(new URL(url).search);
+    }
     return kiroraFetch(url, init);
   });
   const kirora = pushClient();

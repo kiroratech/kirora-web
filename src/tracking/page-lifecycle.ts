@@ -25,7 +25,9 @@ export function watchPageLifecycle(
       handlers.onHidden();
       return;
     }
-    if (returned) handlers.onReturn();
+    if (returned) {
+      handlers.onReturn();
+    }
     whileVisible = setInterval(() => handlers.whileVisible(), intervalMs);
   };
   const onVisibilityChange = () => onVisibility(true);

@@ -8,7 +8,9 @@ import { uuid } from '../utils/uuid.js';
  */
 export function installationId(storage: KeyValueStorage, key: string): string {
   const stored = storage.getItem(key);
-  if (stored) return stored;
+  if (stored) {
+    return stored;
+  }
   const installationId = uuid();
   storage.setItem(key, installationId);
   return installationId;

@@ -1,12 +1,13 @@
 // Defects found in the 22 November 2026 pre-release audit, each pinned by the scenario
 // that exposed it.
 import { afterEach, expect, it, vi } from 'vitest';
+import { EventQueue } from '../src/events/event-queue.js';
 import { Kirora, type KiroraOptions } from '../src/index.js';
 import {
-  accepted,
   fakeKirora,
   kiroraRefusing,
   memoryStorage,
+  recordSends,
   sentEvents,
   stubLocalStorage,
   tokenFor,
@@ -22,6 +23,13 @@ afterEach(() => {
 const QUEUE_KEY = 'kirora:events:kirora_pk_test@api.kirora.io';
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Lets `turns` rounds of already-settled promises run, without letting any time pass. */
+async function flushMicrotasks(turns: number): Promise<void> {
+  for (let turn = 0; turn < turns; turn++) {
+    await Promise.resolve();
+  }
+}
+
 function client(options: Partial<KiroraOptions> = {}) {
   return new Kirora({
     clientKey: 'kirora_pk_test',
@@ -33,37 +41,34 @@ function client(options: Partial<KiroraOptions> = {}) {
 
 it("never sends a signed-out user's pre-sign-in events as the next user, once Kirora took their token", async () => {
   stubLocalStorage();
-  const sent: [string | undefined, string][] = [];
   let ada: 'offline' | 'expired' | 'ok' = 'ok';
-  vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
-    const user = userOf(init);
+  const sent = recordSends((url, init) => {
     if (url.endsWith('/push-consent')) {
       return Promise.resolve(new Response(null, { status: 204 }));
     }
-    if (user === 'ada' && ada === 'offline') {
+    if (userOf(init) === 'ada' && ada === 'offline') {
       return Promise.reject(new TypeError('Failed to fetch'));
     }
-    if (user === 'ada' && ada === 'expired') {
+    if (userOf(init) === 'ada' && ada === 'expired') {
       return Promise.resolve(new Response(null, { status: 401 }));
     }
-    const batch = JSON.parse(String(init.body)) as { events: { name: string }[] };
-    sent.push(
-      ...batch.events.map(({ name }): [string | undefined, string] => [user, name]),
-    );
-    return Promise.resolve(accepted(batch));
+    return undefined;
   });
   const kirora = client();
   kirora.track('Pre-login Browsing');
   ada = 'offline';
   await kirora.identify(tokenFor('ada'));
   await kirora.flush();
+
   // Kirora accepts Ada's token on another call: her sign-in stands.
   ada = 'ok';
   await kirora.setPushConsent(true);
+
   // Her token then expires, with no fetchUserToken to replace it.
   ada = 'expired';
   await kirora.flush();
   expect(localStorage.getItem(QUEUE_KEY)).toContain('Pre-login Browsing');
+
   // On a shared device, Ada signs out and Bob signs in.
   await kirora.logout();
   await kirora.identify(tokenFor('bob'));
@@ -179,12 +184,16 @@ it('keeps keepalive requests in flight together within the browser’s 64 KiB wh
   await kirora.identify(tokenFor('ada'));
   vi.stubGlobal('document', { visibilityState: 'hidden' });
   const note = 'x'.repeat(2_800);
-  for (let index = 0; index < 19; index++) kirora.track(`Note ${index}`, { note });
+  for (let index = 0; index < 19; index++) {
+    kirora.track(`Note ${index}`, { note });
+  }
   await tick();
   void kirora.flush();
   await tick();
   // Twenty or more waiting starts another send at once.
-  for (let index = 19; index < 40; index++) kirora.track(`Note ${index}`, { note });
+  for (let index = 19; index < 40; index++) {
+    kirora.track(`Note ${index}`, { note });
+  }
   await tick(10);
   expect(peak).toBeGreaterThan(0);
   expect(peak).toBeLessThanOrEqual(60_000);
@@ -273,7 +282,7 @@ it("keeps an event the app tracks as the page hides, after the SDK's own hide fl
   // The SDK's visibilitychange listener runs first, then the app's.
   void kirora.flush();
   kirora.track('Page Left');
-  for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+  await flushMicrotasks(50);
   const sent = sentEvents(server.handled).map(({ name }) => name);
   const stored = localStorage.getItem(QUEUE_KEY) ?? '';
   expect(sent.includes('Page Left') || stored.includes('Page Left')).toBe(true);
@@ -311,20 +320,17 @@ it('refreshes on time on a device whose clock is behind', async () => {
 
 it('sends without keepalive when the browser refuses a keepalive request (Chrome 80)', async () => {
   stubLocalStorage();
-  const sent: string[] = [];
-  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
-    // As Chrome 80, which can't send a keepalive request needing a CORS preflight.
-    if (init.keepalive) return Promise.reject(new TypeError('Failed to fetch'));
-    const batch = JSON.parse(String(init.body)) as { events: { name: string }[] };
-    sent.push(...batch.events.map(({ name }) => name));
-    return Promise.resolve(accepted(batch));
-  });
+  // As Chrome 80, which can't send a keepalive request needing a CORS preflight.
+  const sent = recordSends((_url, init) =>
+    init.keepalive ? Promise.reject(new TypeError('Failed to fetch')) : undefined,
+  );
   const kirora = client();
   await kirora.identify(tokenFor('ada'));
+
   vi.stubGlobal('document', { visibilityState: 'hidden' });
   kirora.track('Page Left');
   await kirora.flush();
-  expect(sent).toEqual(['Page Left']);
+  expect(sent.map(({ name }) => name)).toEqual(['Page Left']);
   kirora.destroy();
 });
 
@@ -332,24 +338,22 @@ it('keeps the events when a hidden send fails with and without keepalive', async
   stubLocalStorage();
   const attempts: boolean[] = [];
   let online = false;
-  const sent: string[] = [];
-  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
+  const sent = recordSends((_url, init) => {
     attempts.push(Boolean(init.keepalive));
-    if (!online) return Promise.reject(new TypeError('Failed to fetch'));
-    const batch = JSON.parse(String(init.body)) as { events: { name: string }[] };
-    sent.push(...batch.events.map(({ name }) => name));
-    return Promise.resolve(accepted(batch));
+    return online ? undefined : Promise.reject(new TypeError('Failed to fetch'));
   });
   const kirora = client();
   await kirora.identify(tokenFor('ada'));
+
   vi.stubGlobal('document', { visibilityState: 'hidden' });
   kirora.track('Page Left');
   await kirora.flush();
   expect(attempts.slice(-2)).toEqual([true, false]);
+
   vi.stubGlobal('document', { visibilityState: 'visible' });
   online = true;
   await kirora.flush();
-  expect(sent).toEqual(['Page Left']);
+  expect(sent.map(({ name }) => name)).toEqual(['Page Left']);
   kirora.destroy();
 });
 
@@ -389,23 +393,12 @@ it("waits out an accepted batch's Retry-After for the events it left unsettled",
 
 it("still leaves another user's session out of events a failed sign-in gave back", async () => {
   stubLocalStorage();
-  const sent: { user: string | undefined; sessionId?: string; name: string }[] = [];
-  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
-    const user = userOf(init);
-    // Ada's token is refused at once: her sign-in fails and gives the events back.
-    if (user === 'ada') return Promise.resolve(new Response(null, { status: 401 }));
-    const batch = JSON.parse(String(init.body)) as {
-      events: { name: string; context: { sessionId?: string } }[];
-    };
-    sent.push(
-      ...batch.events.map(({ name, context }) => ({
-        user,
-        name,
-        sessionId: context.sessionId,
-      })),
-    );
-    return Promise.resolve(accepted(batch));
-  });
+  // Ada's token is refused at once: her sign-in fails and gives the events back.
+  const sent = recordSends((_url, init) =>
+    userOf(init) === 'ada'
+      ? Promise.resolve(new Response(null, { status: 401 }))
+      : undefined,
+  );
   // Ada was active on this browser: her session is the live one.
   const adaPage = client({ trackSessions: true });
   await adaPage.identify(tokenFor('ada'));
@@ -430,7 +423,6 @@ it("still leaves another user's session out of events a failed sign-in gave back
 });
 
 it("keeps an event tracked while hidden after this tab's earlier clear, in order", async () => {
-  const { EventQueue } = await import('../src/events/event-queue.js');
   const storage = memoryStorage();
   const queue = new EventQueue(storage, 'workspace');
   await queue.add(

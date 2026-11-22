@@ -61,27 +61,36 @@ export function eventTime(): Date {
  * registration. One it can't say is left out, never sent empty.
  */
 export function localeAndTimezone(): Pick<PageContext, 'locale' | 'timezone'> {
-  if (localeAndTimezoneOnce) return localeAndTimezoneOnce;
+  if (localeAndTimezoneOnce) {
+    return localeAndTimezoneOnce;
+  }
   const found: Pick<PageContext, 'locale' | 'timezone'> = {};
   const locale = typeof navigator === 'undefined' ? undefined : navigator.language;
-  if (locale) found.locale = locale;
+  if (locale) {
+    found.locale = locale;
+  }
   try {
     const { timeZone } = Intl.DateTimeFormat().resolvedOptions();
-    if (timeZone) found.timezone = timeZone;
+    if (timeZone) {
+      found.timezone = timeZone;
+    }
   } catch {
     // Some embedded browsers throw for a time zone they can't name: leave it out.
   }
-  return (localeAndTimezoneOnce = found);
+  localeAndTimezoneOnce = found;
+  return found;
 }
 
 /**
  * Page info for an event's `context`, collected as Segment's analytics.js collects it.
  * Kirora cuts values longer than it keeps, so none are cut here. The page's markup is the
- * site's, so a malformed address in it is left out (or the page's
- * own used instead) rather than thrown.
+ * site's, so a malformed address in it is left out (or the page's own used instead)
+ * rather than thrown.
  */
 export function pageContext(): PageContext {
-  if (typeof location === 'undefined' || typeof document === 'undefined') return {};
+  if (typeof location === 'undefined' || typeof document === 'undefined') {
+    return {};
+  }
 
   // During a replay, the page is the one the loader saw when the call was made.
   const address = urlOf(heldCall?.href) ?? new URL(location.href);
@@ -98,11 +107,15 @@ export function pageContext(): PageContext {
     search: address.search,
     title,
   };
-  if (referrer) page.referrer = withoutFragment(referrer);
+  if (referrer) {
+    page.referrer = withoutFragment(referrer);
+  }
 
   const context: PageContext = { ...localeAndTimezone(), page };
   const campaign = campaignTags(address);
-  if (Object.keys(campaign).length > 0) context.campaign = campaign;
+  if (Object.keys(campaign).length > 0) {
+    context.campaign = campaign;
+  }
   return context;
 }
 
@@ -112,9 +125,13 @@ export function pageContext(): PageContext {
  * the browser shows. Never the fragment.
  */
 function pageUrl(address: URL, canonical: URL | undefined): string {
-  if (!canonical) return withoutFragment(address);
+  if (!canonical) {
+    return withoutFragment(address);
+  }
   const url = new URL(canonical.href);
-  if (!url.search) url.search = address.search;
+  if (!url.search) {
+    url.search = address.search;
+  }
   return withoutFragment(url);
 }
 
@@ -130,8 +147,12 @@ export function sessionStartedProperties({
   campaign = {},
 }: PageContext): Record<string, string> {
   const properties: Record<string, string> = {};
-  if (page) properties.path = page.path;
-  if (page?.referrer) properties.referrer = page.referrer;
+  if (page) {
+    properties.path = page.path;
+  }
+  if (page?.referrer) {
+    properties.referrer = page.referrer;
+  }
   for (const [field, value] of Object.entries(campaign)) {
     properties[CAMPAIGN_TAGS[field as CampaignField]] = value;
   }
@@ -143,7 +164,9 @@ function campaignTags(address: URL): Campaign {
   const campaign: Campaign = {};
   for (const [field, tag] of Object.entries(CAMPAIGN_TAGS)) {
     const value = address.searchParams.get(tag);
-    if (value) campaign[field as CampaignField] = value;
+    if (value) {
+      campaign[field as CampaignField] = value;
+    }
   }
   return campaign;
 }
@@ -169,7 +192,9 @@ function waitForNewTitle(previousTitle: string, onReady: () => void): void {
 
   let finished = false;
   const finish = () => {
-    if (finished) return;
+    if (finished) {
+      return;
+    }
     finished = true;
     observer.disconnect();
     clearTimeout(unchangedTimeout);
@@ -177,10 +202,14 @@ function waitForNewTitle(previousTitle: string, onReady: () => void): void {
     onReady();
   };
   const observer = new MutationObserver(() => {
-    if (hasNewTitle()) finish();
+    if (hasNewTitle()) {
+      finish();
+    }
   });
   const unchangedTimeout = setTimeout(() => {
-    if (document.title !== '') finish();
+    if (document.title !== '') {
+      finish();
+    }
   }, UNCHANGED_TITLE_WAIT_MS);
   const emptyTimeout = setTimeout(finish, EMPTY_TITLE_WAIT_MS);
   // The title lives in <head>, and frameworks change it by replacing or editing <title>.
@@ -205,12 +234,16 @@ export function watchPageViews(onPageView: () => void): () => void {
     const previousTitle = document.title;
     // Deferred, so a navigation that changes the path more than once counts once.
     setTimeout(() => {
-      if (!watching || location.pathname === lastPath) return;
+      if (!watching || location.pathname === lastPath) {
+        return;
+      }
       const newPath = location.pathname;
       lastPath = newPath;
       waitForNewTitle(previousTitle, () => {
         // Not if the app has moved on meanwhile: that page gets its own view.
-        if (watching && location.pathname === newPath) onPageView();
+        if (watching && location.pathname === newPath) {
+          onPageView();
+        }
       });
     });
   };
@@ -240,13 +273,17 @@ let patched: History | undefined;
  * page views there.
  */
 function patchHistory(): void {
-  if (typeof history === 'undefined' || patched === history) return;
+  if (typeof history === 'undefined' || patched === history) {
+    return;
+  }
   patched = history;
   for (const method of ['pushState', 'replaceState'] as const) {
     const original = history[method].bind(history);
     history[method] = (...args: Parameters<History['pushState']>) => {
       original(...args);
-      for (const watcher of navigationWatchers) watcher();
+      for (const watcher of navigationWatchers) {
+        watcher();
+      }
     };
   }
 }

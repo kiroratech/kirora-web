@@ -54,7 +54,9 @@ export class NotificationTaps {
     this.listeners.add(listener);
     const held = this.held;
     this.held = [];
-    for (const data of held) this.call(listener, data);
+    for (const data of held) {
+      this.call(listener, data);
+    }
   }
 
   remove(listener: NotificationClickListener): void {
@@ -63,17 +65,27 @@ export class NotificationTaps {
 
   private receive(message: unknown): void {
     const tap = message as { kirora?: unknown; id?: unknown; data?: unknown } | null;
-    if (tap?.kirora !== 'notificationClick' || typeof tap.id !== 'string') return;
-    if (this.seen.includes(tap.id)) return;
+    if (tap?.kirora !== 'notificationClick' || typeof tap.id !== 'string') {
+      return;
+    }
+    if (this.seen.includes(tap.id)) {
+      return;
+    }
     this.seen.push(tap.id);
-    if (this.seen.length > MAX_SEEN) this.seen.shift();
+    if (this.seen.length > MAX_SEEN) {
+      this.seen.shift();
+    }
     const data = stringsOf(tap.data);
     if (this.listeners.size === 0) {
       this.held.push(data);
-      if (this.held.length > MAX_HELD) this.held.shift();
+      if (this.held.length > MAX_HELD) {
+        this.held.shift();
+      }
       return;
     }
-    for (const listener of this.listeners) this.call(listener, data);
+    for (const listener of this.listeners) {
+      this.call(listener, data);
+    }
   }
 
   /** Each listener gets its own copy, and its errors are logged, never thrown. */
@@ -89,9 +101,13 @@ export class NotificationTaps {
 /** The push's `data`, keeping only string values, as Kirora sends them. */
 function stringsOf(data: unknown): Record<string, string> {
   const strings: Record<string, string> = {};
-  if (typeof data !== 'object' || data === null) return strings;
+  if (typeof data !== 'object' || data === null) {
+    return strings;
+  }
   for (const [key, value] of Object.entries(data)) {
-    if (typeof value === 'string') strings[key] = value;
+    if (typeof value === 'string') {
+      strings[key] = value;
+    }
   }
   return strings;
 }

@@ -105,7 +105,9 @@ async function deliver(data: string, action = '') {
   listeners.push!({ data: { json: () => JSON.parse(data) as unknown }, waitUntil });
   await Promise.all(waits);
   const notification = shown[before];
-  if (!notification) return undefined;
+  if (!notification) {
+    return undefined;
+  }
   listeners.notificationclick!({
     action,
     notification: { data: notification.options.data, close: () => undefined },

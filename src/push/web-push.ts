@@ -1,7 +1,12 @@
 import type { NotificationTaps } from './notification-taps.js';
 import { SDK_NAME, type ClientApi } from '../api/client-api.js';
 import type { Identity, SignedInUser } from '../identity/identity.js';
-import { KiroraApiError, KiroraError } from '../errors.js';
+import {
+  isSettledRefusal,
+  KiroraApiError,
+  KiroraError,
+  retryAfterOf,
+} from '../errors.js';
 import { readJson, type KeyValueStorage } from '../storage/device-storage.js';
 import { STORAGE_KEYS } from '../storage/keys.js';
 import { localeAndTimezone } from '../tracking/page-context.js';
@@ -109,24 +114,33 @@ export class WebPush {
   }
 
   async requestPermission(): Promise<PushPermission> {
-    if (!this.options || !webPushSupported()) return 'unsupported';
-    const permission = await Notification.requestPermission();
-    // `default` means the prompt was dismissed: nothing to tell Kirora.
-    if (permission !== 'default') {
-      // Saying yes to the prompt is turning push on.
-      if (permission === 'granted') this.storage.removeItem(this.disabledKey);
-      // Registered, or a denial reported. A failure doesn't change the answer:
-      // getPushStatus() says whether this browser is registered.
-      await this.register().catch((error: unknown) => {
-        const what =
-          permission === 'granted'
-            ? 'register this browser for push'
-            : 'tell Kirora notifications are blocked';
-        this.log('error', `Couldn't ${what}`, error);
-      });
+    if (!this.options || !webPushSupported()) {
+      return 'unsupported';
     }
-    // `default` means the prompt was dismissed.
-    return permission === 'default' ? 'unanswered' : permission;
+    const permission = await Notification.requestPermission();
+
+    // The prompt was dismissed: nothing to tell Kirora.
+    if (permission === 'default') {
+      return 'unanswered';
+    }
+
+    // Saying yes to the prompt is turning push on.
+    if (permission === 'granted') {
+      this.storage.removeItem(this.disabledKey);
+    }
+
+    // Registered, or a denial reported. A failure doesn't change the answer:
+    // getPushStatus() says whether this browser is registered.
+    try {
+      await this.register();
+    } catch (error) {
+      const what =
+        permission === 'granted'
+          ? 'register this browser for push'
+          : 'tell Kirora notifications are blocked';
+      this.log('error', `Couldn't ${what}`, error);
+    }
+    return permission;
   }
 
   /**
@@ -138,11 +152,15 @@ export class WebPush {
   register(): Promise<void> {
     // Captured now: the registration is for this user, or nobody.
     const { user } = this.identity;
-    if (!user) return Promise.resolve();
+    if (!user) {
+      return Promise.resolve();
+    }
     return this.oneAtATime(async () => {
       try {
         await this.registerAs(user);
-        if (this.failedFor === user) this.failedFor = undefined;
+        if (this.failedFor === user) {
+          this.failedFor = undefined;
+        }
       } catch (error) {
         this.failedFor = user;
         throw error;
@@ -155,7 +173,9 @@ export class WebPush {
    * granted. Returns a function that stops, or undefined if there's nothing to watch.
    */
   watchTaps(taps: NotificationTaps): (() => void) | undefined {
-    if (!this.options || !webPushSupported()) return undefined;
+    if (!this.options || !webPushSupported()) {
+      return undefined;
+    }
     // A tap that opened this page can only have come with permission granted.
     return taps.watch(this.serviceWorkerUrl, Notification.permission === 'granted');
   }
@@ -165,9 +185,15 @@ export class WebPush {
    * for the user signed in now. Waits for a registration under way.
    */
   async status(): Promise<PushStatus> {
-    if (!this.options || !webPushSupported()) return 'unsupported';
-    if (Notification.permission === 'denied') return 'denied';
-    if (Notification.permission !== 'granted') return 'unanswered';
+    if (!this.options || !webPushSupported()) {
+      return 'unsupported';
+    }
+    if (Notification.permission === 'denied') {
+      return 'denied';
+    }
+    if (Notification.permission !== 'granted') {
+      return 'unanswered';
+    }
     await this.operations;
     const { user } = this.identity;
     const registered =
@@ -175,7 +201,9 @@ export class WebPush {
       this.failedFor !== user &&
       !this.disabled &&
       this.registeredFor(user.subject, this.config(this.options)) !== undefined;
-    if (!registered) return 'disabled';
+    if (!registered) {
+      return 'disabled';
+    }
     // The browser may have dropped its subscription since. One the worker replaced (and
     // told Kirora about) has a new endpoint, so any subscription counts.
     const subscription = await currentSubscription(this.serviceWorkerUrl).catch(
@@ -200,72 +228,73 @@ export class WebPush {
     // Read in turn, after any registration still under way.
     const ours = await this.operations.then(() => this.registered);
     const { user } = this.identity;
-    if (user) await this.detach(user);
-    if (ours) await this.oneAtATime(() => this.cancelSubscription());
+    if (user) {
+      await this.detach(user);
+    }
+    if (ours) {
+      await this.oneAtATime(() => this.cancelSubscription());
+    }
   }
 
   private get disabled(): boolean {
     return this.storage.getItem(this.disabledKey) !== null;
   }
 
+  /** Whether Kirora has this browser on record as registered, as far as it knows. */
+  get registered(): boolean {
+    return this.storage.getItem(this.registrationKey) !== null;
+  }
+
   private async registerAs(user: SignedInUser): Promise<void> {
     const { options } = this;
     const current = () => this.identity.user === user;
-    if (!options || !current() || !webPushSupported() || this.disabled) return;
+    if (!options || !current() || !webPushSupported() || this.disabled) {
+      return;
+    }
     const config = this.config(options);
-    if (Notification.permission === 'denied') return this.reportDenied(user, config);
-    if (Notification.permission !== 'granted') return;
-    if ((await this.registrationIsFresh(user.subject, config)) || !current()) return;
+    if (Notification.permission === 'denied') {
+      return this.reportDenied(user, config);
+    }
+    if (Notification.permission !== 'granted') {
+      return;
+    }
+    if ((await this.registrationIsFresh(user.subject, config)) || !current()) {
+      return;
+    }
     // Independent, so done together: which app to use, and a worker ready to subscribe.
     const [pushApp, worker] = await Promise.all([
       this.choosePushApp(user, options.pushAppId),
       readyRegistration(this.serviceWorkerUrl),
     ]);
-    if (!pushApp || !current()) return;
+    if (!pushApp || !current()) {
+      return;
+    }
+    // The worker's record outlives a logout's: proof a subscription is ours after it.
+    const workerRecord = await this.readWorkerRecord(worker.scope);
     const subscription = await pushSubscription(
       worker,
       pushApp.vapidPublicKey,
       this.lastRegistration(),
-      // The worker's record outlives a logout's: proof a subscription is ours after it.
-      // Bounded, as IndexedDB may never answer (Safari 14): registering doesn't need it.
-      await withTimeout(readSubscription(worker.scope), WORKER_RECORD_TIMEOUT_MS).catch(
-        () => undefined,
-      ),
+      workerRecord,
     );
-    if (!current()) return;
-    // For the worker, to tell Kirora when the browser replaces this subscription. Saved
-    // before Kirora answers, so it's known as ours even if that fails (`pushSubscription`).
-    await withTimeout(
-      saveSubscription(worker.scope, {
-        url: `${this.api.apiUrl!}/client/v1/push-subscription-change`,
-        apiUrl: this.api.apiUrl!,
-        clientKey: this.api.clientKey,
-        sdk: SDK_NAME,
-        pushAppId: pushApp.pushAppId,
-        vapidPublicKey: pushApp.vapidPublicKey,
-        subscription,
-      }),
-      WORKER_RECORD_TIMEOUT_MS,
-    ).catch((error: unknown) => {
-      this.log('debug', "Couldn't keep the subscription for the service worker", error);
-    });
+    if (!current()) {
+      return;
+    }
+
+    // Saved before Kirora answers, so it's known as ours even if that fails.
+    await this.saveWorkerRecord(worker.scope, pushApp, subscription);
     // Again: the user may have changed while that was saved.
-    if (!current()) return;
-    const answer = await this.api.request<DeviceAnswer>(
-      'PUT',
-      `/devices/${this.installationId()}`,
-      {
-        as: user,
-        body: {
-          pushAppId: pushApp.pushAppId,
-          targetKind: 'web_push_subscription',
-          permission: 'granted',
-          subscription,
-          // For push reports. No app or OS version: Kirora reads the user agent.
-          ...localeAndTimezone(),
-        },
-      },
-    );
+    if (!current()) {
+      return;
+    }
+
+    const answer = await this.putDevice(user, {
+      pushAppId: pushApp.pushAppId,
+      targetKind: 'web_push_subscription',
+      permission: 'granted',
+      subscription,
+    });
+
     // Saved even if the user changed meanwhile: it records who Kirora now has, so the
     // next user's registration (queued behind this one) isn't skipped as fresh.
     const registration: PushRegistration = {
@@ -282,35 +311,83 @@ export class WebPush {
   }
 
   /**
+   * `PUT /devices/<installation id>` as `user`, with the browser's language and time zone
+   * for push reports. No app or OS version: Kirora reads the user agent.
+   */
+  private putDevice(
+    user: SignedInUser,
+    body: Record<string, unknown>,
+  ): Promise<DeviceAnswer | undefined> {
+    return this.api.request<DeviceAnswer>('PUT', `/devices/${this.installationId()}`, {
+      as: user,
+      body: { ...body, ...localeAndTimezone() },
+    });
+  }
+
+  /**
+   * The worker's record of the subscription, if it has one. Bounded, as IndexedDB may
+   * never answer (Safari 14): registering doesn't need it.
+   */
+  private async readWorkerRecord(scope: string): Promise<SavedSubscription | undefined> {
+    try {
+      return await withTimeout(readSubscription(scope), WORKER_RECORD_TIMEOUT_MS);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Keeps the subscription for the worker, so it can tell Kirora when the browser
+   * replaces it. Bounded and best effort, as reading it is.
+   */
+  private async saveWorkerRecord(
+    scope: string,
+    pushApp: PushApp,
+    subscription: PushSubscriptionJSON,
+  ): Promise<void> {
+    const record: SavedSubscription = {
+      url: `${this.api.apiUrl!}/client/v1/push-subscription-change`,
+      apiUrl: this.api.apiUrl!,
+      clientKey: this.api.clientKey,
+      sdk: SDK_NAME,
+      pushAppId: pushApp.pushAppId,
+      vapidPublicKey: pushApp.vapidPublicKey,
+      subscription,
+    };
+    try {
+      await withTimeout(saveSubscription(scope, record), WORKER_RECORD_TIMEOUT_MS);
+    } catch (error) {
+      this.log('debug', "Couldn't keep the subscription for the service worker", error);
+    }
+  }
+
+  /**
    * Tells Kirora this browser's permission is denied, so it stops counting the browser as
    * reachable, and the device moves to `user` if someone else registered it. Only a
    * browser registered before can say so: the denial names that registration.
    */
   private async reportDenied(user: SignedInUser, config: string): Promise<void> {
     const last = this.lastRegistration();
-    if (!last?.pushAppId || !last.lastSeenAt || last.config !== config) return;
+    if (!last?.pushAppId || !last.lastSeenAt || last.config !== config) {
+      return;
+    }
     const reported = last.denied && last.userSubject === user.subject;
-    if (reported && Date.now() - last.at <= REGISTRATION_REFRESH_MS) return;
+    if (reported && Date.now() - last.at <= REGISTRATION_REFRESH_MS) {
+      return;
+    }
     let answer: DeviceAnswer;
     try {
-      answer = await this.api.request<DeviceAnswer>(
-        'PUT',
-        `/devices/${this.installationId()}`,
-        {
-          as: user,
-          body: {
-            pushAppId: last.pushAppId,
-            permission: 'denied',
-            lastSeenAt: last.lastSeenAt,
-            ...localeAndTimezone(),
-          },
-        },
-      );
+      answer = await this.putDevice(user, {
+        pushAppId: last.pushAppId,
+        permission: 'denied',
+        lastSeenAt: last.lastSeenAt,
+      });
     } catch (error) {
       // 409: registered again somewhere this browser doesn't know. 404: not this user's
       // device, or none. Nothing to say either way until permission is granted again.
-      const final = error instanceof KiroraApiError && [404, 409].includes(error.status);
-      if (!final) throw error;
+      if (!isSettledRefusal(error)) {
+        throw error;
+      }
       this.storage.removeItem(this.registrationKey);
       return;
     }
@@ -324,10 +401,6 @@ export class WebPush {
     };
     this.storage.setItem(this.registrationKey, JSON.stringify(denial));
     this.log('debug', 'Told Kirora notifications are blocked in this browser');
-  }
-
-  get registered(): boolean {
-    return this.storage.getItem(this.registrationKey) !== null;
   }
 
   /**
@@ -346,13 +419,17 @@ export class WebPush {
       const last = this.lastRegistration();
       // Registered for someone else (another tab's sign-in took it over): not this
       // user's to detach, nor their subscription to cancel.
-      if (last && last.userSubject !== user.subject) return Promise.resolve();
+      if (last && last.userSubject !== user.subject) {
+        return Promise.resolve();
+      }
       // With no record, it may still have been registered (its answer lost, or storage
       // full): detached unconditionally, wherever it could have been. Kirora answers 404
       // if there's nothing of this user's.
       const couldBeRegistered =
         this.options && webPushSupported() && Notification.permission === 'granted';
-      if (!last && !couldBeRegistered) return Promise.resolve();
+      if (!last && !couldBeRegistered) {
+        return Promise.resolve();
+      }
       const cleanup: Cleanup = {
         user,
         installationId: this.installationId(),
@@ -368,7 +445,9 @@ export class WebPush {
   /** Stops detachments still being retried, and anything else on a timer. */
   destroy(): void {
     this.destroyed = true;
-    for (const retry of this.retries) clearTimeout(retry);
+    for (const retry of this.retries) {
+      clearTimeout(retry);
+    }
     this.retries.clear();
   }
 
@@ -378,64 +457,78 @@ export class WebPush {
     first: boolean,
     deadline?: number,
   ): Promise<void> {
-    if (this.destroyed) return;
+    if (this.destroyed) {
+      return;
+    }
     // Forgotten now, so the user signing in again registers again.
     if (first && this.lastRegistration()?.userSubject === cleanup.user.subject) {
       this.storage.removeItem(this.registrationKey);
     }
-    const since = cleanup.lastSeenAt
-      ? `?lastSeenAt=${encodeURIComponent(cleanup.lastSeenAt)}`
-      : '';
+    let since = '';
+    if (cleanup.lastSeenAt) {
+      since = `?lastSeenAt=${encodeURIComponent(cleanup.lastSeenAt)}`;
+    }
+
     try {
       await this.api.request('DELETE', `/devices/${cleanup.installationId}${since}`, {
         // While the user is still signed in, an expired token is refreshed as for any
         // call. Once they've signed out, a refresh finds them gone and gives up, so a
         // token never comes through the next user's fetchUserToken.
         as: cleanup.user,
-        // Ends early enough to cancel the subscription by the deadline if it fails. Out
-        // of time already, it fails at once: the subscription is cancelled now, and the
-        // detachment is retried in the background.
-        timeoutMs:
-          deadline &&
-          Math.max(deadline - Date.now() - (cleanup.registered ? CANCEL_TIME_MS : 0), 1),
+        timeoutMs: cleanupTimeout(deadline, cleanup.registered),
       });
       this.log('debug', 'Detached this browser');
       return;
     } catch (error) {
       // 409: the user registered the browser again since, which Kirora kept. 404: there
       // was nothing of theirs here. Either way it's done, and the subscription is theirs.
-      const done = error instanceof KiroraApiError && [404, 409].includes(error.status);
-      if (done) return;
-      if (first && cleanup.registered) await this.cancelSubscription();
-      const retryable = !(error instanceof KiroraApiError) || error.retryable;
-      const retryAt =
-        Date.now() +
-        Math.max(
-          cleanup.retryDelayMs,
-          (error instanceof KiroraApiError && error.retryAfterMs) || 0,
-        );
-      // Destroyed while this attempt was on its way.
-      if (this.destroyed) return;
-      if (!retryable || retryAt > cleanup.giveUpAt) {
-        this.log('error', "Couldn't detach this browser from the signed-out user", error);
+      if (isSettledRefusal(error)) {
         return;
       }
-      if (first) this.log('debug', "Couldn't detach this browser yet; retrying", error);
-      cleanup.retryDelayMs = Math.min(cleanup.retryDelayMs * 2, MAX_CLEANUP_RETRY_MS);
-      const retry = setTimeout(() => {
-        this.retries.delete(retry);
-        void this.oneAtATime(() => this.attemptCleanup(cleanup, false));
-      }, retryAt - Date.now());
-      this.retries.add(retry);
+      if (first && cleanup.registered) {
+        await this.cancelSubscription();
+      }
+      // Destroyed while this attempt was on its way.
+      if (this.destroyed) {
+        return;
+      }
+      this.retryCleanup(cleanup, error, first);
     }
+  }
+
+  /**
+   * Tries `cleanup` again after its backoff, never sooner than `Retry-After`, if the
+   * failure may pass and a day hasn't gone by; logs it otherwise.
+   */
+  private retryCleanup(cleanup: Cleanup, error: unknown, first: boolean): void {
+    const retryable = !(error instanceof KiroraApiError) || error.retryable;
+    const retryAt = Date.now() + Math.max(cleanup.retryDelayMs, retryAfterOf(error));
+    if (!retryable || retryAt > cleanup.giveUpAt) {
+      this.log('error', "Couldn't detach this browser from the signed-out user", error);
+      return;
+    }
+
+    if (first) {
+      this.log('debug', "Couldn't detach this browser yet; retrying", error);
+    }
+    cleanup.retryDelayMs = Math.min(cleanup.retryDelayMs * 2, MAX_CLEANUP_RETRY_MS);
+    const retry = setTimeout(() => {
+      this.retries.delete(retry);
+      void this.oneAtATime(() => this.attemptCleanup(cleanup, false));
+    }, retryAt - Date.now());
+    this.retries.add(retry);
   }
 
   /** Cancels the browser's push subscription, logging a failure. Never rejects. */
   private async cancelSubscription(): Promise<void> {
-    if (!webPushSupported()) return;
+    if (!webPushSupported()) {
+      return;
+    }
     try {
       const worker = await navigator.serviceWorker.getRegistration(this.serviceWorkerUrl);
-      if (!worker) return;
+      if (!worker) {
+        return;
+      }
       // Forgotten first, or the worker could subscribe the browser again when the browser
       // reports the subscription gone.
       await forgetSubscription(worker.scope).catch((error: unknown) => {
@@ -493,7 +586,9 @@ export class WebPush {
     config: string,
   ): Promise<boolean> {
     const last = this.registeredFor(userSubject, config);
-    if (!last || Date.now() - last.at > REGISTRATION_REFRESH_MS) return false;
+    if (!last || Date.now() - last.at > REGISTRATION_REFRESH_MS) {
+      return false;
+    }
     return last.endpoint === (await currentSubscription(this.serviceWorkerUrl))?.endpoint;
   }
 
@@ -503,13 +598,17 @@ export class WebPush {
     pushAppId: string | undefined,
   ): Promise<PushApp | undefined> {
     const query = new URLSearchParams({ platform: 'web' });
-    if (pushAppId) query.set('pushAppId', pushAppId);
+    if (pushAppId) {
+      query.set('pushAppId', pushAppId);
+    }
     try {
       return await this.api.request<PushApp>('GET', `/push-app?${query.toString()}`, {
         as: user,
       });
     } catch (error) {
-      if (!(error instanceof KiroraApiError && error.status === 404)) throw error;
+      if (!(error instanceof KiroraApiError && error.status === 404)) {
+        throw error;
+      }
       this.log('error', 'No ready web push app in this workspace');
       return undefined;
     }
@@ -546,14 +645,7 @@ async function pushSubscription(
   const applicationServerKey = base64UrlBytes(vapidPublicKey);
   const existing = await registration.pushManager.getSubscription();
   if (existing) {
-    // The record of what we registered last, if this subscription is the one we made:
-    // the page's, or failing that (cleared by a logout) the worker's.
-    const ourRecord =
-      existing.endpoint === last?.endpoint
-        ? last
-        : existing.endpoint === saved?.subscription.endpoint
-          ? { vapidPublicKey: saved.vapidPublicKey }
-          : null;
+    const ourRecord = recordOf(existing, last, saved);
     if (madeWithKey(existing, vapidPublicKey, applicationServerKey, ourRecord)) {
       return existing.toJSON();
     }
@@ -565,11 +657,47 @@ async function pushSubscription(
     // Ours, but made with a key the push app no longer uses: replace it.
     await existing.unsubscribe();
   }
+
   const subscription = await registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey,
   });
   return subscription.toJSON();
+}
+
+/**
+ * How long a detachment may take before `deadline` (epoch ms), if there is one: early
+ * enough to cancel a registered subscription by then if it fails. Out of time already,
+ * it fails at once, so the subscription is cancelled now and the detachment is retried
+ * in the background.
+ */
+function cleanupTimeout(
+  deadline: number | undefined,
+  registered: boolean,
+): number | undefined {
+  if (deadline === undefined) {
+    return undefined;
+  }
+  const cancelling = registered ? CANCEL_TIME_MS : 0;
+  return Math.max(deadline - Date.now() - cancelling, 1);
+}
+
+/**
+ * Our record of `existing`, if it's the subscription we made: the page's record of what it
+ * registered last, or failing that (a logout clears it), the worker's.
+ */
+function recordOf(
+  existing: PushSubscription,
+  last: PushRegistration | null,
+  saved: SavedSubscription | undefined,
+): Pick<PushRegistration, 'vapidPublicKey'> | null {
+  if (last && existing.endpoint === last.endpoint) {
+    return last;
+  }
+  if (saved?.subscription && existing.endpoint === saved.subscription.endpoint) {
+    return { vapidPublicKey: saved.vapidPublicKey };
+  }
+  return null;
 }
 
 /**
@@ -584,7 +712,9 @@ function madeWithKey(
 ): boolean {
   // Missing in Firefox before 75, which can't say which key made a subscription.
   const options = existing.options as PushSubscriptionOptions | undefined;
-  if (options) return sameKey(options.applicationServerKey, applicationServerKey);
+  if (options) {
+    return sameKey(options.applicationServerKey, applicationServerKey);
+  }
   // Then our own record says which key we used, if we made it; one saved before we
   // stored keys doesn't say, and is taken as made with ours.
   if (ourRecord) {
@@ -608,24 +738,30 @@ async function readyRegistration(
 ): Promise<ServiceWorkerRegistration> {
   const scriptUrl = new URL(serviceWorkerUrl, location.href).href;
   const scope = new URL('./', scriptUrl).href;
+
   const existing = await navigator.serviceWorker.getRegistration(scope);
-  const existingScript = (existing?.active ?? existing?.waiting ?? existing?.installing)
-    ?.scriptURL;
-  // The site registered this worker itself, perhaps at a wider scope: used as it is, as
-  // registering again would add a second copy of it at the default scope.
-  if (existing && existingScript === scriptUrl) {
-    await withTimeout(activated(existing), WORKER_ACTIVATION_TIMEOUT_MS);
-    return existing;
+  if (existing) {
+    const worker = existing.active ?? existing.waiting ?? existing.installing;
+    const existingScript = worker ? worker.scriptURL : undefined;
+
+    // The site registered this worker itself, perhaps at a wider scope: used as it is,
+    // as registering again would add a second copy of it at the default scope.
+    if (existingScript === scriptUrl) {
+      await withTimeout(activated(existing), WORKER_ACTIVATION_TIMEOUT_MS);
+      return existing;
+    }
+
+    // Only a different worker at the very scope we'd register would be replaced. One at
+    // a wider scope keeps its pages, beside ours.
+    if (existingScript && existing.scope === scope) {
+      const path = new URL(existingScript).pathname;
+      throw new KiroraError(
+        `${path} is already this site's service worker. Add ` +
+          `importScripts('/kirora-sw.js') to it and set push: { serviceWorkerUrl: '${path}' }`,
+      );
+    }
   }
-  // Only a different worker at the very scope we'd register would be replaced. One at
-  // a wider scope keeps its pages, beside ours.
-  if (existingScript && existing!.scope === scope) {
-    const path = new URL(existingScript).pathname;
-    throw new KiroraError(
-      `${path} is already this site's service worker. Add ` +
-        `importScripts('/kirora-sw.js') to it and set push: { serviceWorkerUrl: '${path}' }`,
-    );
-  }
+
   const registration = await navigator.serviceWorker.register(serviceWorkerUrl);
   // A worker stuck installing would otherwise hold up every later registration.
   await withTimeout(activated(registration), WORKER_ACTIVATION_TIMEOUT_MS);
@@ -643,10 +779,14 @@ async function currentSubscription(
 /** Resolves once the registration's worker is active. */
 function activated(registration: ServiceWorkerRegistration): Promise<void> {
   const worker = registration.installing ?? registration.waiting;
-  if (registration.active || !worker) return Promise.resolve();
+  if (registration.active || !worker) {
+    return Promise.resolve();
+  }
   return new Promise((resolve, reject) => {
     worker.addEventListener('statechange', () => {
-      if (worker.state === 'activated') resolve();
+      if (worker.state === 'activated') {
+        resolve();
+      }
       if (worker.state === 'redundant') {
         reject(new KiroraError('the service worker failed to install'));
       }
@@ -655,7 +795,9 @@ function activated(registration: ServiceWorkerRegistration): Promise<void> {
 }
 
 function sameKey(current: ArrayBuffer | null, wanted: Uint8Array): boolean {
-  if (!current) return false;
+  if (!current) {
+    return false;
+  }
   const currentBytes = new Uint8Array(current);
   return (
     currentBytes.length === wanted.length &&
